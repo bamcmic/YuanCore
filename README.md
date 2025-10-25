@@ -1,6 +1,6 @@
 # YuanCore (元核)
 
-[简体中文](README.md) | [English](README.E-H.md)
+[简体中文](README.zh-ch.md) | [English](README.md)
 
 ![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-brightgreen.svg)
@@ -74,7 +74,7 @@ YuanCore
   |______Development Documentation
   |
   |____References
-
+  |
   |__Gallery
 ```
 ---
