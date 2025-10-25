@@ -3,6 +3,9 @@ YuanCore (元核)
 https://img.shields.io/badge/License-Apache--2.0-green.svg https://img.shields.io/badge/Status-Active%20Development-brightgreen.svg https://img.shields.io/badge/Architecture-x86__64-lightgrey.svg
 
 YuanCore (中文名: 元核) 是一个自由、开源，从零开始构建的操作系统项目。其名称"元核"寓意"万物之本，创世之核"，代表了我们从最本源开始，打造一个纯粹、安全、高效的计算基石的愿景。
+<p align="center">
+  <img src="/Gallery/ace.png" width="400">
+</p>
 
 🌟 愿景
 
@@ -46,6 +49,7 @@ YuanCore
   |__Tool
   |__Development Documentation
   |__References
+  |__Gallery
 ```
 🤝 参与贡献
 
