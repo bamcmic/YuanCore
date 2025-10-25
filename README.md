@@ -15,15 +15,8 @@ YuanCore (中文名: 元核) 是一个自由、开源，从零开始构建的操
 
 🚧 当前状态
 
-元核正处于早期积极开发阶段。我们已实现：
-
-· 自定义引导加载程序
-· 64位长模式进入
-· 基本物理和虚拟内存管理
-· 中断描述符表(IDT)和基本中断处理
-· 进程管理与调度器 (开发中)
-· 系统调用接口 (开发中)
-· 用户态与权限分离 (规划中)
+元核正处于早期积极开发阶段。
+  (规划中)
 
 🛠 技术栈
 
@@ -35,44 +28,23 @@ YuanCore (中文名: 元核) 是一个自由、开源，从零开始构建的操
 · 版本控制: Git
 
 📁 项目结构
-
-```
-YuanCore/
-├── boot/           # 引导加载程序
-├── kernel/         # 内核核心代码
-│   ├── arch/       # 架构相关代码
-│   ├── mm/         # 内存管理
-│   ├── task/       # 进程管理
-│   └── sys/        # 系统调用
-├── lib/            # 内核库函数
-├── scripts/        # 构建脚本
-└── tools/          # 开发工具
-```
-
-🚀 构建与运行
-
-prerequisites
-
-```bash
-# Ubuntu/Debian
-sudo apt install build-essential qemu-system-x86 gdb git
-```
-
-获取源码
-
-```bash
-git clone https://github.com/your-username/YuanCore.git
-cd YuanCore
-```
-
-编译与运行
-
-```bash
-make all        # 编译完整内核
-make run        # 在QEMU中运行
-make debug      # 在调试模式下运行
-make clean      # 清理构建文件
-```
+YuanCore
+  |__source code
+  |    |__Commented code
+  |    |    |__C source code
+  |    |    |__Assembly section
+  |    |    |__MORE
+  |    |__Uncommented code
+  |    |    |__C source code
+  |    |    |__Assembly section
+  |    |    |__MORE
+  |__Assembly section
+  |    |__arm64/32
+  |    |__x86/64
+  |__Insights
+  |__Tool
+  |__Development Documentation
+  |__References
 
 🤝 参与贡献
 
@@ -101,7 +73,11 @@ Apache-2.0 许可证是一个宽松的开源许可证，它允许：
 
 👨‍💻 开发者
 
-· [bamcmic&马一凯] - 项目发起人与核心维护者
+· [bamcmic
+   &马一凯
+   &DeepSeek
+   &ChatGpt
+   &Gemini] - 项目发起人与核心维护者
 · 期待你的名字出现在这里
 
 🌐 联系方式
@@ -118,4 +94,4 @@ Apache-2.0 许可证是一个宽松的开源许可证，它允许：
 
 ---
 
-此README将随项目进展不断更新。最后更新: 2025年8月
+此README将随项目进展不断更新。最后更新: 2025年10月25日
