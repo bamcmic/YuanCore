@@ -59,9 +59,9 @@ YuanCore
   |    |    |__Assembly section
   |    |    |__MORE
   |    |__Uncommented code
-  |    |    |__C source code
-  |    |    |__Assembly section
-  |    |    |__MORE
+  |         |__C source code
+  |         |__Assembly section
+  |         |__MORE
   |__Assembly section
   |    |__arm64/32
   |    |__x86/64
