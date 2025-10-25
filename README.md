@@ -53,22 +53,28 @@ YuanCore（中文名：元核）不仅是一个操作系统，它是一个生态
 ## 🗂 项目结构 Project Structure
 ```
 YuanCore
-  |__source code
-  |    |__Commented code
-  |    |    |__C source code
-  |    |    |__Assembly section
-  |    |    |__MORE
-  |    |__Uncommented code
+  |___source code
+  |    |____Commented code
+  |    |    |____C source code
+  |    |    |____Assembly section
+  |    |    |____MORE
+  |    |____Uncommented code
   |         |__C source code
   |         |__Assembly section
   |         |__MORE
-  |__Assembly section
-  |    |__arm64/32
-  |    |__x86/64
-  |__Insights
-  |__Tool
-  |__Development Documentation
-  |__References
+  |
+  |____Assembly section
+  |    |___arm64/32
+  |    |___x86/64
+  |
+  |__________Insights
+  |
+  |________Tool
+  |
+  |______Development Documentation
+  |
+  |____References
+
   |__Gallery
 ```
 ---
