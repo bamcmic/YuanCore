@@ -28,7 +28,7 @@ YuanCore (中文名: 元核) 是一个自由、开源，从零开始构建的操
 · 版本控制: Git
 
 📁 项目结构
-YuanCore
+'''YuanCore
   |__source code
   |    |__Commented code
   |    |    |__C source code
@@ -45,7 +45,7 @@ YuanCore
   |__Tool
   |__Development Documentation
   |__References
-
+'''
 🤝 参与贡献
 
 元核是一个开放的开源项目，我们欢迎各种形式的贡献！
