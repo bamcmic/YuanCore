@@ -1,17 +1,17 @@
-name: Manual Kernel Build (auto-detect, bin + QEMU screenshot + log)
+name: Manual Kernel Build (auto-detect + bin)
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Kernel version folder name (e.g., 0.001bate)"
+      source_folder:
+        description: "Source folder name (e.g., 0.001bate)"
         required: true
         default: "0.001bate"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: Build kernel -> .bin + QEMU screenshot + log
+    name: Build kernel -> .bin
 
     steps:
       - name: Checkout repository
@@ -20,14 +20,13 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-multilib binutils nasm qemu-system-x86 imagemagick xvfb bc
+          sudo apt-get install -y --no-install-recommends gcc-multilib binutils nasm
 
       - name: Prepare paths
         id: prep
         run: |
-          SRC="source code/Commented code/C source code/${{ github.event.inputs.version }}"
-          OUT="Assembly_section/x86_64/${{ github.event.inputs.version }}"
+          SRC="source code/Commented code/C source code/${{ github.event.inputs.source_folder }}"
+          OUT="Assembly_section/x86_64/${{ github.event.inputs.source_folder }}"
           mkdir -p "$OUT"
           echo "src_dir=$SRC" >> $GITHUB_OUTPUT
           echo "out_dir=$OUT" >> $GITHUB_OUTPUT
@@ -55,21 +54,18 @@ jobs:
           AS_STYLE="gcc"
           BITNESS="64"
           LD_MODE="elf_x86_64"
-          GCC_MODE="-m64"
 
           # Detect assembly syntax and bitness
           if grep -q -E '^\s*BITS\b' boot.s; then
             AS_STYLE="nasm"
             if grep -q -E '^\s*BITS\s+32\b' boot.s; then
-              BITNESS="32"; LD_MODE="elf_i386"; GCC_MODE="-m32"
-            else
-              BITNESS="64"; LD_MODE="elf_x86_64"; GCC_MODE="-m64"
+              BITNESS="32"; LD_MODE="elf_i386"
             fi
           else
             if grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
-              AS_STYLE="gcc"; BITNESS="32"; LD_MODE="elf_i386"; GCC_MODE="-m32"
+              AS_STYLE="gcc"; BITNESS="32"; LD_MODE="elf_i386"
             elif grep -q -E '(%rsp|%rax|movq|syscall|pushq)' boot.s; then
-              AS_STYLE="gcc"; BITNESS="64"; LD_MODE="elf_x86_64"; GCC_MODE="-m64"
+              AS_STYLE="gcc"; BITNESS="64"; LD_MODE="elf_x86_64"
             fi
           fi
 
@@ -84,7 +80,7 @@ jobs:
             [ "$BITNESS" = "32" ] && gcc -c -m32 boot.s -o boot.o || gcc -c -m64 boot.s -o boot.o
           fi
 
-          # Compile kernel.c
+          # Compile kernel.c if exists
           if [ -f kernel.c ]; then
             [ "$BITNESS" = "32" ] && gcc -ffreestanding -c -m32 kernel.c -o kernel.o || gcc -ffreestanding -c -m64 kernel.c -o kernel.o
             OBJS="boot.o kernel.o"
@@ -102,81 +98,10 @@ jobs:
           cp kernel.bin "$OUT/kernel.bin"
           cp kernel.elf "$OUT/kernel.elf" || true
 
-          echo "dest=$OUT" >> $GITHUB_OUTPUT
-          echo "arch=$LD_MODE" >> $GITHUB_OUTPUT
+          echo "Built kernel.bin -> $OUT"
 
-      - name: Run QEMU and capture screenshot + log
-        if: always()
-        env:
-          DISPLAY: ":99"
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="${{ steps.build.outputs.dest }}"
-          ARCH="${{ steps.build.outputs.arch }}"
-          mkdir -p "$OUT"
-
-          # Select QEMU binary based on arch
-          if [ "$ARCH" = "elf_i386" ]; then
-            QEMU_BIN="qemu-system-i386"
-          else
-            QEMU_BIN="qemu-system-x86_64"
-          fi
-
-          # Start virtual display
-          Xvfb :99 -screen 0 1024x768x16 &> /dev/null &
-          sleep 2
-
-          LOGFILE="${OUT}/qemu_serial.log"
-          > "$LOGFILE"
-
-          # Start QEMU
-          $QEMU_BIN \
-            -kernel "${OUT}/kernel.elf" \
-            -m 64M -vga std -display :99 \
-            -no-reboot -no-shutdown -serial file:"$LOGFILE" -smp 1 &
-          QEMU_PID=$!
-          echo "QEMU started ($QEMU_BIN, pid=$QEMU_PID). Waiting for kernel output..."
-
-          # Wait for first output or max 10 seconds
-          TIMEOUT=10
-          INTERVAL=0.5
-          ELAPSED=0
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            if [ -s "$LOGFILE" ]; then
-              echo "Kernel output detected!"
-              break
-            fi
-            sleep $INTERVAL
-            ELAPSED=$(echo "$ELAPSED + $INTERVAL" | bc)
-          done
-
-          sleep 2
-
-          # Print first few lines of kernel serial output to Actions log
-          if [ -s "$LOGFILE" ]; then
-            echo "---- Kernel output (first 10 lines) ----"
-            head -n 10 "$LOGFILE"
-            echo "----------------------------------------"
-          else
-            echo "No kernel output detected."
-          fi
-
-          # Capture screenshot
-          if command -v import >/dev/null 2>&1; then
-            import -window root "${OUT}/screenshot.png" || true
-            echo "Screenshot saved to ${OUT}/screenshot.png"
-          else
-            echo "ImageMagick import not found; skipping screenshot."
-          fi
-
-          kill $QEMU_PID || true
-          sleep 1
-
-      - name: Upload artifacts (bin + screenshot)
+      - name: Upload artifact (bin)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.version }}-artifacts
-          path: |
-            ${{ steps.build.outputs.dest }}/kernel.bin
-            ${{ steps.build.outputs.dest }}/screenshot.png
+          name: kernel-bin-artifact
+          path: ${{ steps.prep.outputs.out_dir }}/kernel.bin
