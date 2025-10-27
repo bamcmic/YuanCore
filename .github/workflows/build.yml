@@ -1,4 +1,4 @@
-name: Manual Kernel Build (auto-detect + bin)
+name: Build Kernel -> .bin
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib binutils nasm
+          sudo apt-get install -y --no-install-recommends gcc-multilib binutils
 
       - name: Prepare paths
         id: prep
@@ -31,77 +31,63 @@ jobs:
           echo "src_dir=$SRC" >> $GITHUB_OUTPUT
           echo "out_dir=$OUT" >> $GITHUB_OUTPUT
 
-      - name: Detect, compile, link and create .bin
+      - name: Build .bin
         id: build
         shell: bash
         run: |
           set -euo pipefail
           SRC="${{ steps.prep.outputs.src_dir }}"
           OUT="${{ steps.prep.outputs.out_dir }}"
-
-          if [ ! -d "$SRC" ]; then
-            echo "ERROR: source directory not found: $SRC"
-            exit 1
-          fi
-
           cd "$SRC"
 
-          if [ ! -f "boot.s" ]; then
+          # 检查 boot.s
+          if [ ! -f boot.s ]; then
             echo "ERROR: boot.s not found in $SRC"
             exit 1
           fi
 
-          AS_STYLE="gcc"
-          BITNESS="64"
-          LD_MODE="elf_x86_64"
+          # 自动检测 32/64 位
+          BITNESS=64
+          if grep -q -E '^\s*BITS\s+32\b' boot.s || grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
+            BITNESS=32
+          fi
+          echo "Detected bitness: $BITNESS"
 
-          # Detect assembly syntax and bitness
-          if grep -q -E '^\s*BITS\b' boot.s; then
-            AS_STYLE="nasm"
-            if grep -q -E '^\s*BITS\s+32\b' boot.s; then
-              BITNESS="32"; LD_MODE="elf_i386"
-            fi
+          # 清理旧文件
+          rm -f boot.o kernel.o kernel.bin
+
+          # 编译 boot.s
+          if [ "$BITNESS" = "32" ]; then
+            gcc -c -m32 boot.s -o boot.o
           else
-            if grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
-              AS_STYLE="gcc"; BITNESS="32"; LD_MODE="elf_i386"
-            elif grep -q -E '(%rsp|%rax|movq|syscall|pushq)' boot.s; then
-              AS_STYLE="gcc"; BITNESS="64"; LD_MODE="elf_x86_64"
-            fi
+            gcc -c -m64 boot.s -o boot.o
           fi
 
-          echo "Assembly: $AS_STYLE, Bitness: $BITNESS"
-
-          rm -f boot.o kernel.o kernel.elf kernel.bin
-
-          # Assemble boot.s
-          if [ "$AS_STYLE" = "nasm" ]; then
-            [ "$BITNESS" = "32" ] && nasm -f elf32 boot.s -o boot.o || nasm -f elf64 boot.s -o boot.o
-          else
-            [ "$BITNESS" = "32" ] && gcc -c -m32 boot.s -o boot.o || gcc -c -m64 boot.s -o boot.o
-          fi
-
-          # Compile kernel.c if exists
+          # 编译 kernel.c（如果存在）
+          OBJS="boot.o"
           if [ -f kernel.c ]; then
-            [ "$BITNESS" = "32" ] && gcc -ffreestanding -c -m32 kernel.c -o kernel.o || gcc -ffreestanding -c -m64 kernel.c -o kernel.o
-            OBJS="boot.o kernel.o"
-          else
-            OBJS="boot.o"
+            if [ "$BITNESS" = "32" ]; then
+              gcc -ffreestanding -c -m32 kernel.c -o kernel.o
+            else
+              gcc -ffreestanding -c -m64 kernel.c -o kernel.o
+            fi
+            OBJS="$OBJS kernel.o"
           fi
 
-          # Link
-          [ "$LD_MODE" = "elf_i386" ] && ld -m elf_i386 -T linker.ld -o kernel.elf $OBJS || ld -m elf_x86_64 -T linker.ld -o kernel.elf $OBJS
-
-          # Create binary
+          # 链接生成 bin
+          LD_MODE=$([ "$BITNESS" = "32" ] && echo elf_i386 || echo elf_x86_64)
+          ld -m $LD_MODE -T linker.ld -o kernel.elf $OBJS
           objcopy -O binary kernel.elf kernel.bin
 
-          mkdir -p "$OUT"
+          # 拷贝到输出目录
           cp kernel.bin "$OUT/kernel.bin"
-          cp kernel.elf "$OUT/kernel.elf" || true
+          echo "kernel.bin created in $OUT"
 
-          echo "Built kernel.bin -> $OUT"
+          # 列出输出文件，确保存在
+          ls -l "$OUT"
 
       - name: Upload artifact (bin)
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-bin-artifact
+          name: kernel-bin
           path: ${{ steps.prep.outputs.out_dir }}/kernel.bin
