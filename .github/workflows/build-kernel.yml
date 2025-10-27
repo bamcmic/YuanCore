@@ -1,4 +1,4 @@
-name: Manual Kernel Build (bin output)
+name: Manual Kernel Build (auto-detect, bin + QEMU screenshot)
 
 on:
   workflow_dispatch:
@@ -11,80 +11,212 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: Build kernel and output .bin
+    name: Build kernel (auto-detect) -> .bin + QEMU screenshot
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Install required packages
         run: |
-          sudo apt update
-          sudo apt install -y gcc-multilib binutils nasm qemu-system-x86 imagemagick x11-apps xvfb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib binutils nasm qemu-system-x86 imagemagick xvfb
 
       - name: Prepare paths
         id: prep
         run: |
-          SRC_DIR="source code/Commented code/C source code/${{ github.event.inputs.version }}"
-          OUT_DIR="Assembly section/x86_64/${{ github.event.inputs.version }}"
-          mkdir -p "$OUT_DIR"
-          echo "src_dir=$SRC_DIR" >> $GITHUB_OUTPUT
-          echo "out_dir=$OUT_DIR" >> $GITHUB_OUTPUT
+          # SOURCE directory where boot.s, kernel.c, linker.ld live
+          SRC="source code/Commented code/C source code/${{ github.event.inputs.version }}"
+          # Fixed output target as you requested
+          OUT="Assembly_section/x86_64/${{ github.event.inputs.version }}"
+          mkdir -p "$OUT"
+          echo "src_dir=$SRC" >> $GITHUB_OUTPUT
+          echo "out_dir=$OUT" >> $GITHUB_OUTPUT
 
-      - name: Build kernel to .bin
+      - name: Detect, compile, link and create .bin
+        id: build
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           SRC="${{ steps.prep.outputs.src_dir }}"
           OUT="${{ steps.prep.outputs.out_dir }}"
+
+          # ensure src exists
+          if [ ! -d "$SRC" ]; then
+            echo "ERROR: source directory not found: $SRC"
+            exit 1
+          fi
+
           cd "$SRC"
 
-          echo "🔍 检测汇编语法..."
+          # ensure boot.s exists
+          if [ ! -f "boot.s" ]; then
+            echo "ERROR: boot.s not found in $SRC"
+            exit 1
+          fi
+
+          # default choices
+          AS_STYLE="gcc"   # or "nasm"
+          BITNESS="64"     # "32" or "64"
+          LD_MODE="elf_x86_64"
+          GCC_MODE="-m64"
+
+          echo "Detecting assembly syntax and bitness..."
+          # Detect NASM style (BITS directive)
           if grep -q -E '^\s*BITS\b' boot.s; then
-            echo "检测到 NASM 语法"
-            STYLE="NASM"
+            AS_STYLE="nasm"
+            if grep -q -E '^\s*BITS\s+32\b' boot.s; then
+              BITNESS="32"
+              LD_MODE="elf_i386"
+              GCC_MODE="-m32"
+            else
+              BITNESS="64"
+              LD_MODE="elf_x86_64"
+              GCC_MODE="-m64"
+            fi
+            echo " -> NASM style detected, BITS=${BITNESS}"
           else
-            echo "检测到 AT&T 语法"
-            STYLE="ATT"
+            # Detect AT&T 32-bit patterns
+            if grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
+              AS_STYLE="gcc"
+              BITNESS="32"
+              LD_MODE="elf_i386"
+              GCC_MODE="-m32"
+              echo " -> AT&T 32-bit patterns detected"
+            elif grep -q -E '(%rsp|%rax|movq|syscall|pushq)' boot.s; then
+              AS_STYLE="gcc"
+              BITNESS="64"
+              LD_MODE="elf_x86_64"
+              GCC_MODE="-m64"
+              echo " -> AT&T 64-bit patterns detected"
+            else
+              # fallback: if file references %esp then 32-bit, else 64-bit
+              if grep -q '%esp' boot.s; then
+                AS_STYLE="gcc"
+                BITNESS="32"
+                LD_MODE="elf_i386"
+                GCC_MODE="-m32"
+                echo " -> Fallback: %esp found -> 32-bit"
+              else
+                AS_STYLE="gcc"
+                BITNESS="64"
+                LD_MODE="elf_x86_64"
+                GCC_MODE="-m64"
+                echo " -> Fallback: assume 64-bit"
+              fi
+            fi
           fi
 
-          echo "🧱 编译中..."
-          if [ "$STYLE" = "NASM" ]; then
-            nasm -f elf64 boot.s -o boot.o
+          echo "Assembly method: $AS_STYLE, bitness: $BITNESS"
+          # Clean previous outputs if any
+          rm -f boot.o kernel.o kernel.elf kernel.bin
+
+          # Assemble boot.s
+          if [ "$AS_STYLE" = "nasm" ]; then
+            if [ "$BITNESS" = "32" ]; then
+              nasm -f elf32 boot.s -o boot.o
+            else
+              nasm -f elf64 boot.s -o boot.o
+            fi
           else
-            gcc -c -m32 boot.s -o boot.o
+            # use gcc as assembler (AT&T)
+            if [ "$BITNESS" = "32" ]; then
+              gcc -c -m32 boot.s -o boot.o
+            else
+              gcc -c -m64 boot.s -o boot.o
+            fi
           fi
 
-          gcc -ffreestanding -c -m32 kernel.c -o kernel.o
+          # Compile kernel.c if exists
+          if [ -f kernel.c ]; then
+            echo "Compiling kernel.c..."
+            if [ "$BITNESS" = "32" ]; then
+              gcc -ffreestanding -c -m32 kernel.c -o kernel.o
+            else
+              gcc -ffreestanding -c -m64 kernel.c -o kernel.o
+            fi
+            OBJS="boot.o kernel.o"
+          else
+            echo "No kernel.c found; linking boot only"
+            OBJS="boot.o"
+          fi
 
-          ld -m elf_i386 -T linker.ld -o kernel.elf boot.o kernel.o
+          # Link into ELF with correct ld mode
+          echo "Linking with ld mode: $LD_MODE"
+          if [ "$LD_MODE" = "elf_i386" ]; then
+            ld -m elf_i386 -T linker.ld -o kernel.elf $OBJS
+          else
+            ld -m elf_x86_64 -T linker.ld -o kernel.elf $OBJS
+          fi
 
-          echo "📦 生成纯二进制镜像..."
+          # Create raw binary
           objcopy -O binary kernel.elf kernel.bin
 
-          cp kernel.bin "../../${OUT}/kernel.bin"
-          cp kernel.elf "../../${OUT}/kernel.elf"
+          # Ensure destination (user requested fixed x86_64 folder)
+          DEST="${OUT}"
+          mkdir -p "$DEST"
 
-          echo "✅ 已生成: ${OUT}/kernel.bin"
+          # Copy outputs
+          cp kernel.bin "$DEST/kernel.bin"
+          cp kernel.elf "$DEST/kernel.elf" || true
 
-      - name: Run QEMU and screenshot
+          echo "Built kernel.bin and kernel.elf -> $DEST"
+          echo "dest=$DEST" >> $GITHUB_OUTPUT
+          echo "arch=${LD_MODE}" >> $GITHUB_OUTPUT
+
+      - name: Run QEMU and capture screenshot
+        if: always()
         env:
           DISPLAY: ":99"
+        shell: bash
         run: |
+          set -euo pipefail
+          OUT="${{ steps.prep.outputs.out_dir }}"
+          # if build step set dest output, prefer that
+          if [ -n "${{ steps.build.outputs.dest  }}" ] 2>/dev/null; then
+            OUT="${{ steps.build.outputs.dest }}"
+          fi
+          # fallback to prep output if needed
+          mkdir -p "$OUT"
+
+          # Start virtual display
           Xvfb :99 -screen 0 1024x768x16 &> /dev/null &
           sleep 2
 
-          qemu-system-x86_64 -kernel "${{ steps.prep.outputs.out_dir }}/kernel.elf" \
-            -m 64M -vga std -display :99 -no-reboot -no-shutdown -serial stdio &
-          PID=$!
+          # Start QEMU in background (use x86_64 qemu; it can run 32-bit kernels)
+          qemu-system-x86_64 \
+            -kernel "${OUT}/kernel.elf" \
+            -m 64M -vga std -display :99 \
+            -no-reboot -no-shutdown -serial stdio -smp 1 &
+          QEMU_PID=$!
+          echo "QEMU started (pid=$QEMU_PID). Waiting for boot output..."
+          # wait a little for kernel to render text on screen
           sleep 4
-          import -window root "${{ steps.prep.outputs.out_dir }}/screenshot.png" || true
-          kill $PID || true
 
-      - name: Upload artifacts
+          # Capture screenshot (ImageMagick import)
+          IMPORT_OK=0
+          if command -v import >/dev/null 2>&1; then
+            import -window root "${OUT}/screenshot.png" || true
+            IMPORT_OK=1
+          else
+            echo "import not available; skipping screenshot"
+          fi
+
+          # Clean up QEMU
+          kill $QEMU_PID || true
+          sleep 1
+
+          if [ $IMPORT_OK -eq 1 ]; then
+            echo "Screenshot saved to ${OUT}/screenshot.png"
+          else
+            echo "No screenshot produced."
+          fi
+
+      - name: Upload artifacts (bin + screenshot)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.version }}-bin
+          name: ${{ github.event.inputs.version }}-artifacts
           path: |
             ${{ steps.prep.outputs.out_dir }}/kernel.bin
             ${{ steps.prep.outputs.out_dir }}/screenshot.png
