@@ -1,4 +1,4 @@
-name: Manual Visual Kernel Build (x86_64)
+name: Manual Kernel Build (bin output)
 
 on:
   workflow_dispatch:
@@ -10,55 +10,81 @@ on:
 
 jobs:
   build:
-    name: Build & Screenshot Kernel
     runs-on: ubuntu-latest
+    name: Build kernel and output .bin
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install required tools
+      - name: Install build tools
         run: |
           sudo apt update
-          sudo apt install -y gcc nasm qemu-system-x86 imagemagick x11-apps xvfb
+          sudo apt install -y gcc-multilib binutils nasm qemu-system-x86 imagemagick x11-apps xvfb
 
-      - name: Build kernel
-        working-directory: "source code/Commented code/C source code/${{ github.event.inputs.version }}"
+      - name: Prepare paths
+        id: prep
         run: |
-          nasm -f elf64 boot.s -o boot.o
-          gcc -ffreestanding -m64 -c kernel.c -o kernel.o
-          ld -n -T linker.ld -o kernel.elf boot.o kernel.o
+          SRC_DIR="source code/Commented code/C source code/${{ github.event.inputs.version }}"
+          OUT_DIR="Assembly section/x86_64/${{ github.event.inputs.version }}"
+          mkdir -p "$OUT_DIR"
+          echo "src_dir=$SRC_DIR" >> $GITHUB_OUTPUT
+          echo "out_dir=$OUT_DIR" >> $GITHUB_OUTPUT
 
-      - name: Create versioned output directory
+      - name: Build kernel to .bin
+        shell: bash
         run: |
-          mkdir -p "Assembly section/x86_64/${{ github.event.inputs.version }}"
-          cp "source code/Commented code/C source code/${{ github.event.inputs.version }}/kernel.elf" \
-             "Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf"
+          set -e
+          SRC="${{ steps.prep.outputs.src_dir }}"
+          OUT="${{ steps.prep.outputs.out_dir }}"
+          cd "$SRC"
 
-      - name: Run kernel in QEMU (with virtual display) and capture screenshot
+          echo "🔍 检测汇编语法..."
+          if grep -q -E '^\s*BITS\b' boot.s; then
+            echo "检测到 NASM 语法"
+            STYLE="NASM"
+          else
+            echo "检测到 AT&T 语法"
+            STYLE="ATT"
+          fi
+
+          echo "🧱 编译中..."
+          if [ "$STYLE" = "NASM" ]; then
+            nasm -f elf64 boot.s -o boot.o
+          else
+            gcc -c -m32 boot.s -o boot.o
+          fi
+
+          gcc -ffreestanding -c -m32 kernel.c -o kernel.o
+
+          ld -m elf_i386 -T linker.ld -o kernel.elf boot.o kernel.o
+
+          echo "📦 生成纯二进制镜像..."
+          objcopy -O binary kernel.elf kernel.bin
+
+          cp kernel.bin "../../${OUT}/kernel.bin"
+          cp kernel.elf "../../${OUT}/kernel.elf"
+
+          echo "✅ 已生成: ${OUT}/kernel.bin"
+
+      - name: Run QEMU and screenshot
         env:
           DISPLAY: ":99"
         run: |
-          Xvfb :99 -screen 0 1024x768x16 &
+          Xvfb :99 -screen 0 1024x768x16 &> /dev/null &
           sleep 2
-          qemu-system-x86_64 \
-            -kernel "Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf" \
-            -m 64M -vga std -display :99 \
-            -no-reboot -no-shutdown \
-            -serial stdio \
-            -smp 1 &
-          QEMU_PID=$!
-          echo "⏳ Waiting for kernel output to appear..."
-          sleep 4  # 让 QEMU 有时间显示文本
-          echo "📸 Capturing screenshot..."
-          import -window root "Assembly section/x86_64/${{ github.event.inputs.version }}/screenshot.png" || true
-          kill $QEMU_PID || true
-          sleep 1
 
-      - name: Upload artifacts (kernel + screenshot)
+          qemu-system-x86_64 -kernel "${{ steps.prep.outputs.out_dir }}/kernel.elf" \
+            -m 64M -vga std -display :99 -no-reboot -no-shutdown -serial stdio &
+          PID=$!
+          sleep 4
+          import -window root "${{ steps.prep.outputs.out_dir }}/screenshot.png" || true
+          kill $PID || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: x86_64-${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.version }}-bin
           path: |
-            Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf
-            Assembly section/x86_64/${{ github.event.inputs.version }}/screenshot.png
+            ${{ steps.prep.outputs.out_dir }}/kernel.bin
+            ${{ steps.prep.outputs.out_dir }}/screenshot.png
