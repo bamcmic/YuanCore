@@ -1,0 +1,91 @@
+name: Build Kernel -> .bin + optional ELF
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_folder:
+        description: "Source folder name (e.g., 0.001bate)"
+        required: true
+        default: "0.001bate"
+      generate_elf:
+        description: "Generate ELF file as well? (true/false)"
+        required: true
+        default: "false"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build kernel -> .bin + optional ELF
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib binutils
+
+      - name: Prepare paths
+        id: prep
+        run: |
+          SRC="source code/Commented code/C source code/${{ github.event.inputs.source_folder }}"
+          OUT="$RUNNER_TEMP/${{ github.event.inputs.source_folder }}"
+          mkdir -p "$OUT"
+          echo "src_dir=$SRC" >> $GITHUB_OUTPUT
+          echo "out_dir=$OUT" >> $GITHUB_OUTPUT
+
+      - name: Build .bin + ELF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SRC="${{ steps.prep.outputs.src_dir }}"
+          OUT="${{ steps.prep.outputs.out_dir }}"
+
+          cd "$SRC"
+
+          if [ ! -f boot.s ]; then
+            echo "ERROR: boot.s not found"
+            exit 1
+          fi
+
+          BITNESS=64
+          if grep -q -E '^\s*BITS\s+32\b' boot.s || grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
+            BITNESS=32
+          fi
+
+          rm -f boot.o kernel.o kernel.elf kernel.bin
+
+          if [ "$BITNESS" = "32" ]; then
+            gcc -c -m32 boot.s -o boot.o
+          else
+            gcc -c -m64 boot.s -o boot.o
+          fi
+
+          OBJS="boot.o"
+          if [ -f kernel.c ]; then
+            if [ "$BITNESS" = "32" ]; then
+              gcc -ffreestanding -c -m32 kernel.c -o kernel.o
+            else
+              gcc -ffreestanding -c -m64 kernel.c -o kernel.o
+            fi
+            OBJS="$OBJS kernel.o"
+          fi
+
+          LD_MODE=$([ "$BITNESS" = "32" ] && echo elf_i386 || echo elf_x86_64)
+          ld -m $LD_MODE -T linker.ld -o kernel.elf $OBJS
+          objcopy -O binary kernel.elf "$OUT/kernel.bin"
+
+          if [ "${{ github.event.inputs.generate_elf }}" = "true" ]; then
+            cp kernel.elf "$OUT/kernel.elf"
+          fi
+
+          ls -l "$OUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: |
+            ${{ steps.prep.outputs.out_dir }}/kernel.bin
+            ${{ steps.prep.outputs.out_dir }}/kernel.elf
