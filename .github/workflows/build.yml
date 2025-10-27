@@ -1,0 +1,78 @@
+name: Manual Kernel Build (auto-detect, bin + QEMU screenshot)
+
+on:
+  workflow_dispatch:  # 手动触发构建
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install required packages
+        run: |
+          sudo apt update
+          sudo apt install -y nasm gcc qemu-system-x86 qemu-utils imagemagick
+
+      - name: Prepare paths
+        run: |
+          mkdir -p Assembly_section/x86_64/0.001bate
+
+      - name: Detect, compile, link and create .bin
+        run: |
+          set -euo pipefail
+          echo "Detecting assembly syntax and bitness..."
+          if grep -q "BITS 64" source\ code/Commented\ code/C\ source\ code/0.001bate/boot.s 2>/dev/null; then
+            ARCH="x86_64"
+            BITS=64
+            LD_FORMAT="elf_x86_64"
+          else
+            ARCH="x86"
+            BITS=32
+            LD_FORMAT="elf_i386"
+          fi
+          echo "Assembly mode: $ARCH ($BITS-bit)"
+          gcc -ffreestanding -m$BITS -c "source code/Commented code/C source code/0.001bate/kernel.c" -o kernel.o
+          nasm -f elf$BITS "source code/Commented code/C source code/0.001bate/boot.s" -o boot.o
+          ld -T "source code/Commented code/C source code/0.001bate/linker.ld" -m $LD_FORMAT -o kernel.elf boot.o kernel.o
+          objcopy -O binary kernel.elf kernel.bin
+          mv kernel.bin kernel.elf "Assembly_section/x86_64/0.001bate/"
+          echo "✅ Built kernel.bin and kernel.elf"
+
+      - name: Run QEMU and capture screenshot
+        run: |
+          set -euo pipefail
+          echo "Starting QEMU..."
+          qemu-system-x86_64 -drive format=raw,file=Assembly_section/x86_64/0.001bate/kernel.bin -nographic -serial mon:stdio -display none &
+          PID=$!
+          sleep 3 || true
+          kill $PID || true
+          echo "Screenshotting framebuffer..."
+          qemu-system-x86_64 -drive format=raw,file=Assembly_section/x86_64/0.001bate/kernel.bin -display sdl -nographic -serial null -vga std &
+          sleep 1
+          import -window root Assembly_section/x86_64/0.001bate/screenshot.png || true
+          pkill qemu || true
+          echo "✅ Screenshot saved -> Assembly_section/x86_64/0.001bate/screenshot.png"
+
+      - name: Upload artifacts (.bin + screenshot)
+        uses: actions/upload-artifact@v4
+        with:
+          name: 0.001bate-artifacts
+          path: Assembly_section/x86_64/0.001bate/
+
+      - name: Commit build outputs to build-artifacts branch
+        run: |
+          mkdir -p build
+          cp Assembly_section/x86_64/0.001bate/kernel.bin build/
+          cp Assembly_section/x86_64/0.001bate/screenshot.png build/
+          cd build
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Auto build: upload kernel.bin and screenshot"
+          git branch -M main
+          git remote add origin https://github.com/${{ github.repository }}.git
+          git push -f https://${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} main:build-artifacts
