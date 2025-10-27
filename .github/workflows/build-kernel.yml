@@ -1,0 +1,64 @@
+name: Manual Visual Kernel Build (x86_64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Kernel version folder name (e.g., 0.001bate)"
+        required: true
+        default: "0.001bate"
+
+jobs:
+  build:
+    name: Build & Screenshot Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install required tools
+        run: |
+          sudo apt update
+          sudo apt install -y gcc nasm qemu-system-x86 imagemagick x11-apps xvfb
+
+      - name: Build kernel
+        working-directory: "source code/Commented code/C source code/${{ github.event.inputs.version }}"
+        run: |
+          nasm -f elf64 boot.s -o boot.o
+          gcc -ffreestanding -m64 -c kernel.c -o kernel.o
+          ld -n -T linker.ld -o kernel.elf boot.o kernel.o
+
+      - name: Create versioned output directory
+        run: |
+          mkdir -p "Assembly section/x86_64/${{ github.event.inputs.version }}"
+          cp "source code/Commented code/C source code/${{ github.event.inputs.version }}/kernel.elf" \
+             "Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf"
+
+      - name: Run kernel in QEMU (with virtual display) and capture screenshot
+        env:
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1024x768x16 &
+          sleep 2
+          qemu-system-x86_64 \
+            -kernel "Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf" \
+            -m 64M -vga std -display :99 \
+            -no-reboot -no-shutdown \
+            -serial stdio \
+            -smp 1 &
+          QEMU_PID=$!
+          echo "⏳ Waiting for kernel output to appear..."
+          sleep 4  # 让 QEMU 有时间显示文本
+          echo "📸 Capturing screenshot..."
+          import -window root "Assembly section/x86_64/${{ github.event.inputs.version }}/screenshot.png" || true
+          kill $QEMU_PID || true
+          sleep 1
+
+      - name: Upload artifacts (kernel + screenshot)
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-${{ github.event.inputs.version }}
+          path: |
+            Assembly section/x86_64/${{ github.event.inputs.version }}/kernel.elf
+            Assembly section/x86_64/${{ github.event.inputs.version }}/screenshot.png
