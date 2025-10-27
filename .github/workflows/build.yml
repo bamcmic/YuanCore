@@ -1,11 +1,17 @@
-name: Manual Kernel Build (auto-detect, bin + QEMU screenshot)
+name: Manual Kernel Build (auto-detect, bin + QEMU screenshot + log)
 
 on:
-  workflow_dispatch:  # 手动触发构建
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Kernel version folder name (e.g., 0.001bate)"
+        required: true
+        default: "0.001bate"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    name: Build kernel -> .bin + QEMU screenshot + log
 
     steps:
       - name: Checkout repository
@@ -13,66 +19,164 @@ jobs:
 
       - name: Install required packages
         run: |
-          sudo apt update
-          sudo apt install -y nasm gcc qemu-system-x86 qemu-utils imagemagick
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-multilib binutils nasm qemu-system-x86 imagemagick xvfb bc
 
       - name: Prepare paths
+        id: prep
         run: |
-          mkdir -p Assembly_section/x86_64/0.001bate
+          SRC="source code/Commented code/C source code/${{ github.event.inputs.version }}"
+          OUT="Assembly_section/x86_64/${{ github.event.inputs.version }}"
+          mkdir -p "$OUT"
+          echo "src_dir=$SRC" >> $GITHUB_OUTPUT
+          echo "out_dir=$OUT" >> $GITHUB_OUTPUT
 
       - name: Detect, compile, link and create .bin
+        id: build
+        shell: bash
         run: |
           set -euo pipefail
-          echo "Detecting assembly syntax and bitness..."
-          if grep -q "BITS 64" source\ code/Commented\ code/C\ source\ code/0.001bate/boot.s 2>/dev/null; then
-            ARCH="x86_64"
-            BITS=64
-            LD_FORMAT="elf_x86_64"
-          else
-            ARCH="x86"
-            BITS=32
-            LD_FORMAT="elf_i386"
+          SRC="${{ steps.prep.outputs.src_dir }}"
+          OUT="${{ steps.prep.outputs.out_dir }}"
+
+          if [ ! -d "$SRC" ]; then
+            echo "ERROR: source directory not found: $SRC"
+            exit 1
           fi
-          echo "Assembly mode: $ARCH ($BITS-bit)"
-          gcc -ffreestanding -m$BITS -c "source code/Commented code/C source code/0.001bate/kernel.c" -o kernel.o
-          nasm -f elf$BITS "source code/Commented code/C source code/0.001bate/boot.s" -o boot.o
-          ld -T "source code/Commented code/C source code/0.001bate/linker.ld" -m $LD_FORMAT -o kernel.elf boot.o kernel.o
-          objcopy -O binary kernel.elf kernel.bin
-          mv kernel.bin kernel.elf "Assembly_section/x86_64/0.001bate/"
-          echo "✅ Built kernel.bin and kernel.elf"
 
-      - name: Run QEMU and capture screenshot
+          cd "$SRC"
+
+          if [ ! -f "boot.s" ]; then
+            echo "ERROR: boot.s not found in $SRC"
+            exit 1
+          fi
+
+          AS_STYLE="gcc"
+          BITNESS="64"
+          LD_MODE="elf_x86_64"
+          GCC_MODE="-m64"
+
+          # Detect assembly syntax and bitness
+          if grep -q -E '^\s*BITS\b' boot.s; then
+            AS_STYLE="nasm"
+            if grep -q -E '^\s*BITS\s+32\b' boot.s; then
+              BITNESS="32"; LD_MODE="elf_i386"; GCC_MODE="-m32"
+            else
+              BITNESS="64"; LD_MODE="elf_x86_64"; GCC_MODE="-m64"
+            fi
+          else
+            if grep -q -E '(%esp|%eax|movl|int \$0x80|pushl)' boot.s; then
+              AS_STYLE="gcc"; BITNESS="32"; LD_MODE="elf_i386"; GCC_MODE="-m32"
+            elif grep -q -E '(%rsp|%rax|movq|syscall|pushq)' boot.s; then
+              AS_STYLE="gcc"; BITNESS="64"; LD_MODE="elf_x86_64"; GCC_MODE="-m64"
+            fi
+          fi
+
+          echo "Assembly: $AS_STYLE, Bitness: $BITNESS"
+
+          rm -f boot.o kernel.o kernel.elf kernel.bin
+
+          # Assemble boot.s
+          if [ "$AS_STYLE" = "nasm" ]; then
+            [ "$BITNESS" = "32" ] && nasm -f elf32 boot.s -o boot.o || nasm -f elf64 boot.s -o boot.o
+          else
+            [ "$BITNESS" = "32" ] && gcc -c -m32 boot.s -o boot.o || gcc -c -m64 boot.s -o boot.o
+          fi
+
+          # Compile kernel.c
+          if [ -f kernel.c ]; then
+            [ "$BITNESS" = "32" ] && gcc -ffreestanding -c -m32 kernel.c -o kernel.o || gcc -ffreestanding -c -m64 kernel.c -o kernel.o
+            OBJS="boot.o kernel.o"
+          else
+            OBJS="boot.o"
+          fi
+
+          # Link
+          [ "$LD_MODE" = "elf_i386" ] && ld -m elf_i386 -T linker.ld -o kernel.elf $OBJS || ld -m elf_x86_64 -T linker.ld -o kernel.elf $OBJS
+
+          # Create binary
+          objcopy -O binary kernel.elf kernel.bin
+
+          mkdir -p "$OUT"
+          cp kernel.bin "$OUT/kernel.bin"
+          cp kernel.elf "$OUT/kernel.elf" || true
+
+          echo "dest=$OUT" >> $GITHUB_OUTPUT
+          echo "arch=$LD_MODE" >> $GITHUB_OUTPUT
+
+      - name: Run QEMU and capture screenshot + log
+        if: always()
+        env:
+          DISPLAY: ":99"
+        shell: bash
         run: |
           set -euo pipefail
-          echo "Starting QEMU..."
-          qemu-system-x86_64 -drive format=raw,file=Assembly_section/x86_64/0.001bate/kernel.bin -nographic -serial mon:stdio -display none &
-          PID=$!
-          sleep 3 || true
-          kill $PID || true
-          echo "Screenshotting framebuffer..."
-          qemu-system-x86_64 -drive format=raw,file=Assembly_section/x86_64/0.001bate/kernel.bin -display sdl -nographic -serial null -vga std &
-          sleep 1
-          import -window root Assembly_section/x86_64/0.001bate/screenshot.png || true
-          pkill qemu || true
-          echo "✅ Screenshot saved -> Assembly_section/x86_64/0.001bate/screenshot.png"
+          OUT="${{ steps.build.outputs.dest }}"
+          ARCH="${{ steps.build.outputs.arch }}"
+          mkdir -p "$OUT"
 
-      - name: Upload artifacts (.bin + screenshot)
+          # Select QEMU binary based on arch
+          if [ "$ARCH" = "elf_i386" ]; then
+            QEMU_BIN="qemu-system-i386"
+          else
+            QEMU_BIN="qemu-system-x86_64"
+          fi
+
+          # Start virtual display
+          Xvfb :99 -screen 0 1024x768x16 &> /dev/null &
+          sleep 2
+
+          LOGFILE="${OUT}/qemu_serial.log"
+          > "$LOGFILE"
+
+          # Start QEMU
+          $QEMU_BIN \
+            -kernel "${OUT}/kernel.elf" \
+            -m 64M -vga std -display :99 \
+            -no-reboot -no-shutdown -serial file:"$LOGFILE" -smp 1 &
+          QEMU_PID=$!
+          echo "QEMU started ($QEMU_BIN, pid=$QEMU_PID). Waiting for kernel output..."
+
+          # Wait for first output or max 10 seconds
+          TIMEOUT=10
+          INTERVAL=0.5
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            if [ -s "$LOGFILE" ]; then
+              echo "Kernel output detected!"
+              break
+            fi
+            sleep $INTERVAL
+            ELAPSED=$(echo "$ELAPSED + $INTERVAL" | bc)
+          done
+
+          sleep 2
+
+          # Print first few lines of kernel serial output to Actions log
+          if [ -s "$LOGFILE" ]; then
+            echo "---- Kernel output (first 10 lines) ----"
+            head -n 10 "$LOGFILE"
+            echo "----------------------------------------"
+          else
+            echo "No kernel output detected."
+          fi
+
+          # Capture screenshot
+          if command -v import >/dev/null 2>&1; then
+            import -window root "${OUT}/screenshot.png" || true
+            echo "Screenshot saved to ${OUT}/screenshot.png"
+          else
+            echo "ImageMagick import not found; skipping screenshot."
+          fi
+
+          kill $QEMU_PID || true
+          sleep 1
+
+      - name: Upload artifacts (bin + screenshot)
         uses: actions/upload-artifact@v4
         with:
-          name: 0.001bate-artifacts
-          path: Assembly_section/x86_64/0.001bate/
-
-      - name: Commit build outputs to build-artifacts branch
-        run: |
-          mkdir -p build
-          cp Assembly_section/x86_64/0.001bate/kernel.bin build/
-          cp Assembly_section/x86_64/0.001bate/screenshot.png build/
-          cd build
-          git init
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Auto build: upload kernel.bin and screenshot"
-          git branch -M main
-          git remote add origin https://github.com/${{ github.repository }}.git
-          git push -f https://${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} main:build-artifacts
+          name: ${{ github.event.inputs.version }}-artifacts
+          path: |
+            ${{ steps.build.outputs.dest }}/kernel.bin
+            ${{ steps.build.outputs.dest }}/screenshot.png
