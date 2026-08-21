@@ -20,7 +20,7 @@ LDFLAGS   = -m elf_i386 -T linker.ld
 SRCS_C   = $(wildcard *.c) $(wildcard mode/*.c)
 OBJS     = $(SRCS_C:.c=.o) boot.o   # boot.o 单独处理
 ELF      = mykernel.elf
-ISO      = myos.iso
+ISO      = YuanCore.iso
 
 # 默认目标
 all: $(ISO)
