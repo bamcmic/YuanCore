@@ -17,6 +17,7 @@
 #define KEY_END     0x106
 #define KEY_PGUP    0x107
 #define KEY_PGDOWN  0x108
+#define KEY_WIN     0x109   /* 左/右 Win 键（唤起/收起任务栏） */
 
 /* 常用控制字符（ASCII 本身就有） */
 #define KEY_TAB        9

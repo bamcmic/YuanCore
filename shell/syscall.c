@@ -18,14 +18,54 @@
 #include "../mode/mouse.h"
 #include "../mode/fs.h"
 #include "../mode/fb.h"
+#include "../mode/timer.h"
+#include "../mode/io.h"
 #include "../mode/memmap.h"
 #include "../mode/exec.h"
 #include "../mode/usermode.h"
 #include "../mode/desktop.h"
+#include "registry.h"
 
 #define YC_MAX_SYSCALLS 32
 
 static void *table[YC_MAX_SYSCALLS];
+
+/* 把内核侧字符串拷进用户缓冲（ring3 读不了内核段，不能直接给指针） */
+static void copy_out(char *dst, int max, const char *src)
+{
+    int i = 0;
+
+    if (dst == 0 || max <= 0)
+        return;
+    if (src == 0) {
+        dst[0] = '\0';
+        return;
+    }
+    while (src[i] != 0 && i < max - 1) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+/* xorshift32：种子取自开机 tick，供程序用 yc_random() 取随机数 */
+static unsigned int rand_state;
+
+static unsigned int rand_next(void)
+{
+    rand_state ^= rand_state << 13;
+    rand_state ^= rand_state >> 17;
+    rand_state ^= rand_state << 5;
+    return rand_state;
+}
+
+static void sleep_ticks(unsigned int n)
+{
+    unsigned int t0 = timer_ticks();
+
+    while (timer_ticks() - t0 < n)
+        hlt();                      /* 内核侧睡眠，CPU 不空转 */
+}
 
 void syscall_init(void)
 {
@@ -52,6 +92,15 @@ void syscall_init(void)
     table[13] = (void *)ui_cursor_get;               /* YC_CURSOR      */
     table[14] = (void *)ui_wait_event;               /* YC_WAIT_EVENT  */
     table[15] = (void *)ui_print_dec;                /* YC_PRINT_DEC   */
+    table[19] = (void *)ui_close_all;                /* YC_CLOSE_ALL   */
+    table[20] = (void *)rand_next;                   /* YC_RANDOM      */
+    table[21] = (void *)timer_ticks;                 /* YC_TICKS       */
+    table[22] = (void *)sleep_ticks;                 /* YC_SLEEP_TICKS */
+    table[23] = (void *)fb_putpixel;                 /* YC_PUTPIXEL    */
+
+    /* 下标 24-27 见 dispatch：注册表与终端显隐（参数组合多样，走分支） */
+
+    rand_state = timer_ticks() | 1;
 
     for (i = 0; i < YC_MAX_SYSCALLS; i++)
         t[i] = table[i];
@@ -92,6 +141,23 @@ void syscall_dispatch(struct registers *r)
                                                   (int *)c, (int *)d);
              break;
     case 15: ui_print_dec(a); r->eax = 0; break;
+    case 19: ui_close_all(); r->eax = 0; break;   /* YC_CLOSE_ALL */
+    case 20: r->eax = rand_next(); break;         /* YC_RANDOM */
+    case 21: r->eax = timer_ticks(); break;       /* YC_TICKS */
+    case 22: sleep_ticks((unsigned int)a); r->eax = 0; break;  /* SLEEP */
+    case 23: fb_putpixel(a, b, (unsigned int)c); r->eax = 0; break;
+    /* 24 YC_REG_COUNT：应用数 */
+    case 24: r->eax = (unsigned int)registry_count(); break;
+    /* 25 YC_REG_NAME(idx, buf, max)：拷出应用名 */
+    case 25: copy_out((char *)b, c, registry_name(a));
+             r->eax = 0; break;
+    /* 26 YC_REG_DESC(idx, buf, max)：拷出描述 */
+    case 26: copy_out((char *)b, c, registry_desc(a));
+             r->eax = 0; break;
+    /* 27 YC_TERM_SHOW(on)：显隐 YuanCore Shell 窗口 */
+    case 27: desktop_terminal_show(a);
+             ui_refresh();
+             r->eax = 0; break;
     case 18:                                     /* YC_EXIT */
         exec_set_exit((int)a);
         user_exit();                             /* 不返回 */

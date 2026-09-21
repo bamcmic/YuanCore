@@ -20,8 +20,17 @@ struct idt_ptr {
 
 #define IDT_ENTRIES 256
 
-static struct idt_entry idt[IDT_ENTRIES];
+/* IDT 独占一个页（linker.ld 的 .idtpage 段），开启分页后设为只读：
+ * 任何对它的写都会在"肇事者的 EIP"处页错误，直接定位踩内存的代码。 */
+static struct idt_entry idt[IDT_ENTRIES]
+    __attribute__((aligned(4096), section(".idtpage")));
 static struct idt_ptr   idtp;
+
+/* 只读保护的范围（kernel.c 在 paging_init 之后调用 paging_set_ro 用） */
+unsigned int idt_page_base(void)
+{
+    return (unsigned int)(unsigned long)&idt;
+}
 
 static isr_handler_t isr_handlers[256];
 
@@ -49,6 +58,19 @@ void isr_register(int no, isr_handler_t h)
 {
     if (no >= 0 && no < 256)
         isr_handlers[no] = h;
+}
+
+/* 快速巡检：关键门有没有被踩。返回 0 = 完好。
+ * 检查项：缺页门(14)/GPF(13) 在、系统调用门 0x80 仍是 DPL3 且指向 0x08。 */
+int idt_verify(void)
+{
+    if (idt[14].sel != 0x08 || (idt[14].flags & 0x80) == 0)
+        return -1;
+    if (idt[13].sel != 0x08 || (idt[13].flags & 0x80) == 0)
+        return -2;
+    if (idt[0x80].sel != 0x08 || idt[0x80].flags != 0xEE)
+        return -3;
+    return 0;
 }
 
 __attribute__((noreturn))

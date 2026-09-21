@@ -326,8 +326,29 @@ eax=号，ebx/ecx/edx/esi/edi=前 5 个参数，第 6 个参数压在用户栈�
 **用户态异常**：GPF/页错误若来自 ring3（cs&3≠0）→ 打印现场并杀掉程序回 shell，
 不再整个系统停机。
 
-syscall 一览（apps/ycapi.h）：print/putc/clear/getkey/key_poll/draw_window/
-label/button/fillrect/refresh/读写文件/mouse_poll/cursor/wait_event/print_dec/exit。
+syscall 一览（apps/ycapi.h，**下标已发布只能追加**）：
+
+| 号 | 名称 | 原型 |
+|---|---|---|
+| 0-2 | print/putc/clear | 输出到控制台 |
+| 3-4 | getkey/key_poll | 阻塞 / 非阻塞取键 |
+| 5-7 | draw_window/label/button | 窗口框架 / 文字 / 按钮 |
+| 8 | fillrect(x,y,w,h,rgb) | 实心矩形 |
+| 9 | refresh | 重绘桌面+终端 |
+| 10-11 | read_file/write_file | ramfs 读写 |
+| 12-13 | mouse_poll/cursor | 鼠标相对事件 / 光标绝对位置 |
+| 14 | wait_event | 阻塞等键盘或鼠标事件 |
+| 15 | print_dec | 十进制输出 |
+| 18 | exit(code) | 退回 shell |
+| 19 | close_all | 关闭所有 UI 窗口 |
+| 20 | random | 32 位 xorshift32（种子=开机 tick） |
+| 21 | ticks | PIT tick 数（100Hz） |
+| 22 | sleep_ticks(n) | 内核 hlt 等 n 个 tick（程序节拍器，不烧 CPU） |
+| 23 | putpixel(x,y,rgb) | 描点 |
+| 24 | reg_count | 应用注册表条目数 |
+| 25 | reg_name(idx, buf, max) | 拷出应用名（内核字符串不能直接给 ring3 指针） |
+| 26 | reg_desc(idx, buf, max) | 拷出应用描述 |
+| 27 | term_show(on) | 显隐 YuanCore Shell 终端窗口（on=0 关，1 开） |
 
 写一个用户程序的模式：
 
@@ -345,9 +366,26 @@ void app_main(void) {
 }
 ```
 
-注意：程序**自己持有主循环**，内核不再替它泵事件——这和 kernel 侧 ui.c 的
-模态窗口模型不同。改了 apps/ 下的程序要重新生成 `mode/app_hello_blob.h`
-（构建命令见 ycapi.h 顶部），内核才能把新版本分发进文件系统。
+节奏型程序（游戏）用 `yc_sleep_ticks(n)` 做主循环节拍：
+
+```c
+while (!over) {
+    yc_sleep_ticks(ticks_per_frame);   /* 内核里 hlt，CPU 不空转 */
+    while ((k = yc_key_poll()) != -1) handle(k);
+    step(); draw();
+}
+```
+
+内置程序（开机自动写进 /apps/，源码 apps/，随内核 blob 分发）：
+
+| 文件 | 说明 |
+|---|---|
+| `/apps/hello.app` | 计数按钮窗口，wait_event 模型范例 |
+| `/apps/closeall.app` | 关闭所有 UI 窗口 |
+| `/apps/snake.app` | **贪吃蛇**：方向键、吃食物加速、Enter 重开、Esc 退出，开机内记录最高分 |
+
+改了 apps/ 下的程序要重新生成对应 `mode/app_*_blob.h`
+（构建命令见 ycapi.h 顶部，`make apps` 一并构建），内核才能把新版本分发进文件系统。
 
 ---
 
@@ -401,6 +439,7 @@ void app_main(void) {
 | `mem` | 物理内存总量/占用/空闲 + 堆统计（含 kmalloc/kfree 自检） |
 | `uptime` | 开机秒数 |
 | `ticks` | 时钟原始 tick 数 |
+| `date` | CMOS 实时时钟（RTC 不可用时报 uptime） |
 | `echo <文本>` | 原样输出 |
 | `settings` | UI/色彩设置（见下） |
 | `ls` / `cat` / `write` / `mkdir` / `rm` / `df` | 文件操作（见 6.5 节） |
@@ -413,15 +452,56 @@ settings                       列出所有颜色项与当前值(RRGGBB)
 settings set <key> <RRGGBB>    改单项，如 settings set titlebar 2E6CB0
 settings preset <name>         应用预置主题
 settings presets               列出可用预置主题
+settings wallpaper <style>     壁纸样式：gradient / solid / dots
+settings clock on|off          任务栏时钟开关
 settings reset                 恢复 default 预置
 ```
 
-可配置项（18 个）：`bg_top` `bg_bottom` `taskbar` `taskbar_line` `titlebar`
+可配置项（18 个颜色）：`bg_top` `bg_bottom` `taskbar` `taskbar_line` `titlebar`
 `title_text` `window_bg` `window_border` `text` `text_dim` `accent` `danger`
-`console_fg` `console_bg` `icon_files` `icon_terminal` `icon_settings` `icon_about`
+`console_fg` `console_bg` `icon_files` `icon_terminal` `icon_settings` `icon_about`；
+另有非颜色选项 `bg_style`（壁纸）与 `clock`（时钟开关），一并持久化。
 
-改完立即生效，不用重启。这些设置目前**只存内存**，重启即回默认——
-等有文件系统/CMOS 后再做持久化。
+改完立即生效（重绘 + 自动保存到 `/settings.cfg`）。宿主是 ramfs，
+**重启后配置仍回默认**——真持久化要等块设备驱动把 ramfs 换成磁盘后端。
+
+### 鼠标点击与桌面
+
+`ui_mouse()` 的左键按下沿按三段路由：
+
+1. **有窗口打开**：先查窗口右上角 × （`desktop_close_hit`）→ 关闭；
+   再查窗口绘制时登记的按钮矩形 → 聚焦并触发。
+2. **无窗口**：查桌面图标（`desktop_icon_hit`，命中区含标签）→ 经
+   `ui_set_launch()` 注册的回调打开对应程序（Files 浏览器 / 回终端 /
+   Settings 窗口 / About 窗口）；再查任务栏 Start → Start 菜单。
+
+命中区几何与绘制共用同一组常量（`desktop.c`），改布局不会出现"画的对不上的
+点不着"。任务栏时钟由 shell 主循环每秒调 `ui_clock_tick()` 刷新，
+文本来自 RTC（`mode/rtc.c`，CMOS 0x70/0x71，UIP 等待 + 双读校验），
+RTC 异常时退回开机时长。
+
+### 屏幕合成器（v0.5）
+
+屏幕按 z 序分四层，每层都能**按矩形局部重画**：
+
+```
+第 4 层  光标            ui.c（保存/恢复块）
+第 3 层  模态窗口        ui.c（ui_open 打开的）
+第 2 层  控制台内容      console.c → console_repaint_region(x,y,w,h)
+第 1 层  桌面            desktop.c → desktop_repaint_region(x,y,w,h)
+                         （壁纸渐变逐行/图标/终端窗口框/任务栏，各自按相交矩形重画）
+```
+
+`ui.c` 的 `compose_region(x,y,w,h)` 把一个矩形从第 1、2 层重新合成出来。
+**光标移动（无窗口时）= 对旧光标矩形做一次 compose** —— 从内容源头重建，
+没有任何"截屏备份"，从构造上杜绝残影（拖影黑线的三次教训都在这一层终结）。
+
+- 有模态窗口时窗口内容静止，光标仍走保存/恢复块（快且准确）；
+  注意保存块是 `(CUR_W+1)x(CUR_H+1)`——**必须比箭头大一圈**，
+  因为黑色投影偏移 +1px 画在箭头矩形之外。
+- `desktop_repaint_region` 重画壁纸时逐行重算渐变插值（先加权再一次取整，
+  见 6.8 节的整除教训），点阵壁纸重铺相交区域的点。
+- 时钟每秒刷新只重画任务栏 96px 宽的小区域。
 
 ### 如何新增一条命令
 
@@ -560,26 +640,67 @@ myos/
 
 ---
 
-## 9. 已知限制
+## 9. 桌面形态与应用模型（v0.6）
 
-- **无分页/虚拟内存**：内核与数据同处平坦空间，越界写不会触发缺页。
-- **无用户态**：GDT 里预留了 ring3 段，但没有 TSS、没有系统调用入口。
-- **无多任务**：没有调度器，`shell_run()` 就是主循环。
-- **无文件系统**：`Files` 图标只是装饰。
-- **键盘只支持 Scan Code Set 1**，无 CapsLock/方向键/组合键。
-- 仅支持 i386 BIOS 引导，不支持 x86_64 / UEFI。
-- `print.o` 等旧产物若残留在根目录，`make clean` 会清掉。
+### 9.1 屏幕层级与任务栏
 
-## 10. 路线图
+    光标 → 模态窗口(可拖动) → 控制台 → 桌面(壁纸/图标/终端框/任务栏)
 
-1. **分页**：页目录/页表 + 缺页处理，把 PMM 的帧真正映射进虚拟地址空间
-2. **内核栈与 TSS**：为 ring3 做准备
-3. **系统调用**：`int 0x80`，用户态 libc 雏形
-4. **多任务调度**：时间片轮转（PIT 已经在产 tick）
-5. **VFS + 内存文件系统**：让 `Files` 图标有东西可点
-6. **鼠标驱动**（PS/2 roll-over 协议）与窗口焦点管理
-7. x86_64 长模式迁移（建议届时切 Limine + Multiboot2）
+- **任务栏在右侧竖放**（TASKBAR_W=48）：Start 在条顶，时钟(HH/MM/SS 竖排)在条底。
+  收起后右缘只留 4px 高亮提示条。
+- **Win 键**（kbd.c 扩展码 E0 5B/5C → KEY_WIN）或点提示条唤起/收起；
+  收起时图标、终端窗口都不受影响，窗口可铺满全屏宽。
+- 桌面图标 4 个：Files(文件管理器) / Terminal(重开终端) / Settings(主题) / About。
+
+### 9.2 终端窗口生命周期
+
+- YuanCore Shell 窗口可点 × 关闭（desktop_terminal_show(0)）。
+- 关闭期间 console 只更新字符缓冲不上屏（console.c 各绘制入口门控），
+  重开（Terminal 图标 / 开始菜单 Terminal / syscall 27）即完整恢复，
+  历史输出不丢。
+- shell 本体在缓冲里照常工作；关闭窗口时打字不可见属预期行为。
+
+### 9.3 窗口拖动
+
+- ui.c 的 ui_mouse：左键在模态窗口标题栏(避开 × 与边框)按下 → 进入拖动，
+  移动事件驱动窗口坐标（屏幕内 clamp），每次移动整屏重排（restore_background
+  + 全窗口 + 光标）。约 78 万像素写/次，QEMU 下轻微拖影感属正常，脏矩形是后续优化。
+
+### 9.4 应用注册表（shell/registry.c）
+
+- 内置静态表（name/desc/path），新增应用加一行即可。
+- 三个消费端：开始菜单检索（大小写不敏感子串过滤）、apps 命令、int 0x80 查询。
+- registry_launch 经 shell 注入的启动器回调（= exec_run），registry 不直接依赖 exec。
+- 程序侧 API 见 ycapi.h 24-26（字符串拷贝语义，ring3 读不了内核段）。
+
+### 9.5 文件管理器（shell/app_desktop.c）
+
+- 目录导航：方向键 + Enter，或鼠标点行；".." 回上级；目录以 / 后缀显示。
+- 文本文件 Enter 进入查看视图（≤600B），Back/Esc 返回列表。
+- 行即按钮（ui_button 登记命中区），键盘焦点与鼠标点击走同一条 ENTER 路径。
 
 ---
 
-*文档对应源码版本：0.2。改了架构记得同步这里。*
+## 10. 已知限制
+
+- **ring3 程序执行默认禁用**（exec.c 稳定性闸门）：切换路径存在两次未定位
+  根因的内核态踩踏史（IDT 门被覆盖，已布 CR0.WP 只读陷阱未获回传结果），
+  为保证系统可用， 与开始菜单启动项默认拒绝并提示；
+  调试用 `settings exp exec on` 启用。修复定位前不作为稳定功能宣传。
+- 单用户程序：同一时刻只有一个 ring3 程序（exec 同步执行）。
+- 程序与内核的隔离靠分页 user 位；无段级保护、无 Cox。
+- ramfs 掉电即失；/settings.cfg、/apps 均为开机重建。
+- 无鼠标指针以外的光标文本输入焦点管理；窗口无最小化。
+- 仅 i386 BIOS 引导。
+
+## 11. 路线图
+
+1. 脏矩形重绘（拖动窗口/合成器的带宽优化）
+2. 多程序并存 + 简单调度器（PIT tick 已就绪）
+3. 块设备驱动（ATA PIO）→ ramfs 换磁盘后端，设置/应用真持久化
+4. ELF 程序动态注册进 registry（扫描 /apps）
+5. x86_64 长模式迁移（Limine + Multiboot2）
+
+---
+
+*文档对应源码版本：0.6。改了架构记得同步这里。*

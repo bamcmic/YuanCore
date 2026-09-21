@@ -23,10 +23,12 @@
 #include "mode/mouse.h"
 #include "mode/tss.h"
 #include "mode/paging.h"
+#include "mode/idt.h"
 #include "mode/io.h"
 #include "shell/syscall.h"
 #include "shell/shell.h"
 #include "mode/app_hello_blob.h"
+#include "mode/app_closeall_blob.h"
 #include "shell/console.h"
 #include "shell/shell.h"
 
@@ -65,42 +67,114 @@ void print_panic(const struct registers *r)
         "Reserved",                "Reserved",
         "Reserved",                "Reserved"
     };
+    unsigned int cr2;
+
+    __asm__ volatile ("movl %%cr2, %0" : "=r"(cr2));
 
     if (fb_ready()) {
         unsigned int white = RGB(0xFF, 0xFF, 0xFF);
-        int x = 60, y = 80;
+        int x = 40, y = 56;
         char b[16];
 
         fb_fillrect(0, 0, (int)fb.width, (int)fb.height,
                     RGB(0x7A, 0x10, 0x10));
         font_drawtext(x, y, "*** YuanCore PANIC ***", white, 3);
-        y += 64;
+        y += 60;
 
         font_drawtext(x, y, "exception: ", white, 2);
-        font_drawtext(x + 160, y, names[r->int_no & 31], white, 2);
-        y += 40;
+        font_drawtext(x + 200, y, names[r->int_no & 31], white, 2);
+        y += 36;
 
-        font_drawtext(x, y, "error code : 0x", white, 2);
-        fmt_hex(r->err_code, b);
-        font_drawtext(x + 220, y, b, white, 2);
-        y += 32;
+        /* 两列一组：cr2/err, eip/cs, eflags/ss */
+        {
+            int cx2[2];
 
-        font_drawtext(x, y, "eip        : 0x", white, 2);
-        fmt_hex(r->eip, b);
-        font_drawtext(x + 220, y, b, white, 2);
-        y += 32;
+            cx2[0] = x;
+            cx2[1] = x + 480;
 
-        font_drawtext(x, y, "cs         : 0x", white, 2);
-        fmt_hex(r->cs, b);
-        font_drawtext(x + 220, y, b, white, 2);
-        y += 32;
+            font_drawtext(cx2[0], y, "cr2    : 0x", white, 2);
+            fmt_hex(cr2, b);
+            font_drawtext(cx2[0] + 200, y, b, white, 2);
+            font_drawtext(cx2[1], y, "err    : 0x", white, 2);
+            fmt_hex(r->err_code, b);
+            font_drawtext(cx2[1] + 200, y, b, white, 2);
+            if (r->int_no == 14) {
+                /* 页错误码解码：bit1=写，bit2=用户态 */
+                const char *acc = (r->err_code & 2) ? "WRITE" : "READ";
+                const char *who = (r->err_code & 4) ? "USER" : "KERNEL";
 
-        font_drawtext(x, y, "eflags     : 0x", white, 2);
-        fmt_hex(r->eflags, b);
-        font_drawtext(x + 220, y, b, white, 2);
-        y += 48;
+                font_drawtext(cx2[1] + 340, y, acc, white, 2);
+                font_drawtext(cx2[1] + 460, y, who, white, 2);
+            }
+            y += 30;
 
-        font_drawtext(x, y, "System halted. Take a photo for debugging.",
+            font_drawtext(cx2[0], y, "eip    : 0x", white, 2);
+            fmt_hex(r->eip, b);
+            font_drawtext(cx2[0] + 200, y, b, white, 2);
+            font_drawtext(cx2[1], y, "cs     : 0x", white, 2);
+            fmt_hex(r->cs, b);
+            font_drawtext(cx2[1] + 200, y, b, white, 2);
+            y += 30;
+
+            font_drawtext(cx2[0], y, "eflags : 0x", white, 2);
+            fmt_hex(r->eflags, b);
+            font_drawtext(cx2[0] + 200, y, b, white, 2);
+            y += 40;
+        }
+
+        /* 通用寄存器 + 段寄存器 + 用户栈指针：污染源就在这些值里 */
+        {
+            struct reg_row {
+                const char *name;
+                unsigned int v;
+            } rows[13];
+            int i, k;
+
+            rows[0].name = "eax";  rows[0].v = r->eax;
+            rows[1].name = "ebx";  rows[1].v = r->ebx;
+            rows[2].name = "ecx";  rows[2].v = r->ecx;
+            rows[3].name = "edx";  rows[3].v = r->edx;
+            rows[4].name = "esi";  rows[4].v = r->esi;
+            rows[5].name = "edi";  rows[5].v = r->edi;
+            rows[6].name = "ebp";  rows[6].v = r->ebp;
+            rows[7].name = "uesp"; rows[7].v = r->user_esp;
+            rows[8].name = "ds ";  rows[8].v = r->ds;
+            rows[9].name = "es ";  rows[9].v = r->es;
+            rows[10].name = "fs "; rows[10].v = r->fs;
+            rows[11].name = "gs "; rows[11].v = r->gs;
+            rows[12].name = "ss "; rows[12].v = r->ss;
+
+            for (i = 0; i < 13; i++) {
+                int lx = x + (i % 4) * 240;
+                int ly = y + (i / 4) * 28;
+
+                font_drawtext(lx, ly, rows[i].name, white, 2);
+                fmt_hex(rows[i].v, b);
+                font_drawtext(lx + 80, ly, b, white, 2);
+            }
+            y += 3 * 28 + 12;
+            for (k = 0; k < 13 % 4; k++)
+                ;
+        }
+
+        /* 内核栈顶 8 个字：栈上残留的返回地址能指认肇事函数 */
+        {
+            unsigned int *sp;
+            int i, k;
+
+            __asm__ volatile ("movl %%esp, %0" : "=r"(sp));
+            font_drawtext(x, y, "stack:", white, 2);
+            y += 30;
+            for (i = 0; i < 8; i++) {
+                fmt_hex(sp[i], b);
+                k = i % 4;
+                font_drawtext(x + k * 240, y, b, white, 2);
+                if (k == 3)
+                    y += 30;
+            }
+        }
+
+        font_drawtext(x, y + 6, "System halted. Take a photo for debugging.",
                       white, 2);
         return;
     }
@@ -109,6 +183,7 @@ void print_panic(const struct registers *r)
     vga_color(0x4F);                       /* 红底白字 */
     printf("*** YuanCore PANIC: exception %d (%s) ***\n\n",
            (int)r->int_no, names[r->int_no & 31]);
+    printf("cr2        : 0x%X\n", cr2);
     printf("error code : 0x%X\n", r->err_code);
     printf("eip        : 0x%X\n", r->eip);
     printf("cs         : 0x%X\n", r->cs);
@@ -136,6 +211,7 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
     tss_init();                            /* ring3 中断切内核栈 */
     idt_init();
     paging_init();                         /* 开分页：此后只碰已映射区域 */
+    paging_set_ro(idt_page_base(), 4096);  /* IDT 只读：写它 → 页错误点名肇事者 */
     irq_init();                            /* 重映射 PIC，只放行 IRQ0/1/2/12 */
 
     pmm_init(mbi);
@@ -150,6 +226,7 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
     fs_write("/docs/about.txt",
              "YuanCore - 32-bit x86 hobby kernel.\n", 37);
     fs_write("/apps/hello.app", app_hello_blob, APP_HELLO_LEN);
+    fs_write("/apps/closeall.app", app_closeall_blob, APP_CLOSEALL_LEN);
 
     kbd_init();
     mouse_init();                          /* PS/2 鼠标，IRQ12 */
@@ -172,6 +249,7 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
 
     /* ---- 图形路径 ---- */
     theme_init();
+    shell_install_clock();                 /* 时钟提供者必须先于首帧注册 */
     desktop_draw(mbi);
 
     syscall_init();                        /* 程序用的服务表(固定地址) */

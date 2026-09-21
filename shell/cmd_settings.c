@@ -14,6 +14,8 @@
 #include "shell.h"
 
 #include "console.h"
+#include "ui.h"
+#include "exp.h"
 
 #include "../mode/theme.h"
 #include "../mode/fb.h"
@@ -26,7 +28,10 @@ static void print_usage(void)
     console_puts("  settings set <key> <RRGGBB>    set one color\n");
     console_puts("  settings preset <name>         apply a preset theme\n");
     console_puts("  settings presets               list preset themes\n");
+    console_puts("  settings wallpaper <style>     gradient / solid / dots\n");
+    console_puts("  settings clock on|off          taskbar clock\n");
     console_puts("  settings ui                    open the theme window\n");
+    console_puts("  settings exp [name] on|off     experimental options\n");
     console_puts("  settings reset                 restore default preset\n");
 }
 
@@ -208,6 +213,90 @@ void cmd_settings(const char *args)
         return;
     }
 
+    if (str_eq(sub, "wallpaper")) {
+        rest = next_token(rest, a, sizeof a);
+
+        if (str_eq(a, "gradient"))     theme_set_bg_style(THEME_WP_GRADIENT);
+        else if (str_eq(a, "solid"))   theme_set_bg_style(THEME_WP_SOLID);
+        else if (str_eq(a, "dots"))    theme_set_bg_style(THEME_WP_DOTS);
+        else {
+            console_puts("styles: gradient | solid | dots\n");
+            return;
+        }
+        apply_and_report("wallpaper");
+        return;
+    }
+
+    if (str_eq(sub, "clock")) {
+        rest = next_token(rest, a, sizeof a);
+
+        if (str_eq(a, "on"))           theme_set_clock_show(1);
+        else if (str_eq(a, "off"))     theme_set_clock_show(0);
+        else {
+            console_puts("usage: settings clock on|off\n");
+            return;
+        }
+        apply_and_report(a);
+        return;
+    }
+
+    /* ---- 实验性选项（运行时生效，不持久化；表在 shell/exp.c） ---- */
+    if (str_eq(sub, "exp")) {
+        rest = next_token(rest, a, sizeof a);
+
+        if (a[0] == '\0') {
+            int i;
+
+            console_puts("Experimental options:\n");
+            for (i = 0; i < exp_count(); i++) {
+                const struct exp_option *o = exp_get(i);
+                int len = 0;
+
+                console_puts("  ");
+                console_puts(o->name);
+                while (o->name[len] != 0) len++;
+                while (len < 10) { console_putc(' '); len++; }
+                console_puts(o->desc);
+                console_puts("  [");
+                console_puts(o->get() ? "on" : "off");
+                console_puts("]\n");
+            }
+            console_puts("toggle: settings exp <name> on|off\n");
+            return;
+        }
+
+        {
+            int i = exp_find(a);
+
+            if (i < 0) {
+                console_puts("unknown option: ");
+                console_puts(a);
+                console_puts("\n");
+                return;
+            }
+            {
+                const struct exp_option *o = exp_get(i);
+
+                rest = next_token(rest, b, sizeof b);
+
+                if (str_eq(b, "on"))        o->set(1);
+                else if (str_eq(b, "off"))  o->set(0);
+                else {
+                    console_puts("usage: settings exp ");
+                    console_puts(o->name);
+                    console_puts(" on|off\n");
+                    return;
+                }
+                shell_redraw_ui();
+                console_puts(o->name);
+                console_puts(" -> ");
+                console_puts(b);
+                console_puts(" (experimental, not saved)\n");
+            }
+        }
+        return;
+    }
+
     if (str_eq(sub, "ui")) {
         app_settings_open();        /* 图形化设置窗口 */
         return;
@@ -226,7 +315,7 @@ void cmd_settings(const char *args)
 }
 
 static const struct shell_command settings_cmd = {
-    "settings", "UI colors: set / preset / reset", cmd_settings
+    "settings", "UI: set / preset / wallpaper / clock / exp / ui", cmd_settings
 };
 
 void cmd_settings_init(void)

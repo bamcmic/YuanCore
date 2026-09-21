@@ -67,13 +67,24 @@ $(ISO): $(ELF)
 	$(GRUB) -o $@ iso/
 
 # 用户程序（ELF32，基址 4MB，入口 app_main；见 apps/ycapi.h）
-apps: apps/hello.app
+# -mno-sse/-mno-sse2/-mno-mmx：qemu32 CPU 没有 SSE2，clang/gcc 若编出
+# SSE 指令，用户态第一条就 #UD（曾在 hello 上实机踩过）
+APP_CFLAGS = -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 \
+             -mno-sse -mno-sse2 -mno-mmx -msoft-float
+
+apps: apps/hello.app apps/closeall.app
 
 apps/hello.o: apps/hello.c apps/ycapi.h
-	$(GCC) -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c $< -o $@
+	$(GCC) $(APP_CFLAGS) -c $< -o $@
 
 apps/hello.app: apps/hello.o
 	$(LD) -m elf_i386 -e app_main -Ttext-segment=0x400000 -o $@ apps/hello.o
+
+apps/closeall.o: apps/closeall.c apps/ycapi.h
+	$(GCC) $(APP_CFLAGS) -c $< -o $@
+
+apps/closeall.app: apps/closeall.o
+	$(LD) -m elf_i386 -e app_main -Ttext-segment=0x400000 -o $@ apps/closeall.o
 
 # 清理
 clean:
@@ -88,6 +99,12 @@ clean:
 #      （同时给 SDL 兜底，防止 QEMU 用的是 SDL 后端）
 run: $(ISO)
 	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} $(QEMU) -cdrom $(ISO)
+
+# 指令级追踪 —— 复现内核崩溃时用：弹出窗口正常玩，崩溃后回终端敲 quit，
+# 生成的 qemu.log 里有崩溃前最后的中断/指令记录（发给 AI 定位）。
+trace: $(ISO)
+	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} \
+		$(QEMU) -cdrom $(ISO) -d int -D qemu.log -monitor stdio
 
 # 无头截图 —— WSL 没有显示服务器（无 WSLg / X server）时用这个代替 make run。
 # QEMU 不弹窗，靠 monitor 的 screendump 把显存整屏导成 PPM。

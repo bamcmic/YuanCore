@@ -26,7 +26,17 @@ struct tss_struct {
 } __attribute__((packed));
 
 static struct tss_struct tss;
-static unsigned char irq_stack[16384] __attribute__((aligned(16)));
+static unsigned char irq_stack[32768] __attribute__((aligned(16)));
+
+/* 栈底金丝雀：中断栈溢出(向下越过最低地址)必然先踩掉它。
+ * 内核主循环周期性检查，踩掉就大声报警，而不是默默腐蚀 TSS/邻居。 */
+#define STACK_CANARY 0xC0DEFEEDu
+static volatile unsigned int canary;
+
+int tss_canary_ok(void)
+{
+    return *(volatile unsigned int *)irq_stack == STACK_CANARY;
+}
 
 void tss_init(void)
 {
@@ -39,6 +49,10 @@ void tss_init(void)
     tss.ss0  = 0x10;                                        /* 内核数据段 */
     tss.esp0 = (unsigned int)irq_stack + sizeof(irq_stack); /* 栈顶(向下长) */
 
+    *(volatile unsigned int *)irq_stack = STACK_CANARY;
+
     gdt_install_tss((unsigned int)&tss, (unsigned short)(sizeof(tss) - 1));
     __asm__ volatile ("ltr %0" : : "m"(sel));
+    canary = STACK_CANARY;
+    (void)canary;
 }

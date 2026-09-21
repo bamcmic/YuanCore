@@ -14,11 +14,14 @@
 #include "../mode/kbd.h"
 #include "../mode/mouse.h"
 #include "../mode/timer.h"
+#include "../mode/rtc.h"
 #include "../mode/pmm.h"
 #include "../mode/heap.h"
 #include "../mode/io.h"
 #include "../mode/multiboot.h"
 #include "../mode/desktop.h"
+#include "../mode/exec.h"
+#include "registry.h"
 
 #define LINE_MAX 160
 #define CMD_MAX  24
@@ -191,6 +194,30 @@ static void cmd_reboot(const char *args)
         hlt();
 }
 
+static void cmd_date(const char *args)
+{
+    struct rtc_time t;
+
+    (void)args;
+    if (rtc_read(&t) == 0) {
+        put_dec((unsigned int)t.year);   console_putc('-');
+        if (t.month < 10) console_putc('0');
+        put_dec((unsigned int)t.month);  console_putc('-');
+        if (t.day < 10) console_putc('0');
+        put_dec((unsigned int)t.day);    console_puts("  ");
+        if (t.hour < 10) console_putc('0');
+        put_dec((unsigned int)t.hour);   console_putc(':');
+        if (t.min < 10) console_putc('0');
+        put_dec((unsigned int)t.min);    console_putc(':');
+        if (t.sec < 10) console_putc('0');
+        put_dec((unsigned int)t.sec);    console_puts("  (RTC)\n");
+    } else {
+        console_puts("rtc unavailable, uptime is ");
+        put_dec(timer_uptime_sec());
+        console_puts(" s\n");
+    }
+}
+
 static void register_builtin_commands(void)
 {
     static const struct shell_command builtins[] = {
@@ -200,6 +227,7 @@ static void register_builtin_commands(void)
         { "mem",    "physical memory / heap statistics", cmd_mem    },
         { "uptime", "seconds since boot",                cmd_uptime },
         { "ticks",  "raw timer tick count",              cmd_ticks  },
+        { "date",   "real time from the CMOS clock",     cmd_date   },
         { "reboot", "reset the machine",                 cmd_reboot }
     };
     unsigned int i;
@@ -494,6 +522,71 @@ void shell_redraw_ui(void)
     ui_refresh();
 }
 
+/* ---- 桌面点击启动（ui.c 的图标/Start 回调） ---- */
+
+/* 桌面小程序（app_desktop.c） */
+extern void app_files_open(void);
+extern void app_about_open(void);
+extern void app_startmenu_open(void);
+extern void app_settings_open(void);
+
+void shell_desktop_launch(int id)
+{
+    switch (id) {
+    case 0:  app_files_open();      break;
+    case 1:  /* Terminal：重开 shell 窗口并回到终端 */
+        desktop_terminal_show(1);
+        ui_close_all();
+        ui_refresh();
+        break;
+    case 2:  app_settings_open();   break;
+    case 3:  app_about_open();      break;
+    case 4:  app_startmenu_open();  break;
+    default: break;
+    }
+}
+
+/* ---- 任务栏时钟的文本来源：RTC 优先，坏了退回 uptime ---- */
+
+static void shell_clock_provider(char *buf, int max)
+{    struct rtc_time t;
+
+    if (rtc_read(&t) == 0) {
+        buf[0] = (t.hour < 10) ? '0' : (char)('0' + t.hour / 10);
+        buf[1] = (char)('0' + t.hour % 10);
+        buf[2] = ':';
+        buf[3] = (t.min < 10) ? '0' : (char)('0' + t.min / 10);
+        buf[4] = (char)('0' + t.min % 10);
+        buf[5] = ':';
+        buf[6] = (t.sec < 10) ? '0' : (char)('0' + t.sec / 10);
+        buf[7] = (char)('0' + t.sec % 10);
+        buf[8] = '\0';
+        return;
+    }
+    /* RTC 异常：显示开机时长 */
+    {
+        unsigned int s = timer_uptime_sec();
+        unsigned int h = s / 3600, m = (s % 3600) / 60;
+
+        buf[0] = (h < 10) ? '0' : (char)('0' + h / 10);
+        buf[1] = (char)('0' + h % 10);
+        buf[2] = ':';
+        buf[3] = (m < 10) ? '0' : (char)('0' + m / 10);
+        buf[4] = (char)('0' + m % 10);
+        buf[5] = ':';
+        s %= 60;
+        buf[6] = (s < 10) ? '0' : (char)('0' + s / 10);
+        buf[7] = (char)('0' + s % 10);
+        buf[8] = '\0';
+    }
+    (void)max;
+}
+
+void shell_install_clock(void)
+{
+    desktop_set_clock_provider(shell_clock_provider);
+}
+
 void shell_init(void)
 {
     mbi_ref = desktop_mbi();
@@ -504,10 +597,16 @@ void shell_init(void)
     cmd_mouse_init();
     cmd_exec_init();
 
+    /* 应用注册表：开始菜单检索 / apps 命令 / int 0x80 查询共用 */
+    registry_set_launcher(exec_run);
+    registry_init();
+    registry_command_init();
+
     console_puts("YuanCore shell - type 'help' for commands.\n");
     line_reset();
     prompt();
     ui_mouse_init();              /* 光标初始位置居中 */
+    ui_set_launch(shell_desktop_launch);
 }
 
 void shell_run(void)
@@ -516,9 +615,25 @@ void shell_run(void)
         int c = kbd_poll();
         int dx, dy, btn;
 
-        /* 先处理鼠标：移动光标 / 点击 */
+        /* 先处理鼠标：移动光标 / 点击（图标、Start、×、窗口内按钮） */
         while (mouse_poll(&dx, &dy, &btn))
             ui_mouse(dx, dy, btn);
+
+        /* 实验性:全局刷新 ~30fps(exp refresh)。PIT 100Hz,
+         * 帧号 = tick*30/100,帧号变化即重绘整屏。空闲时靠 timer 中断
+         * 唤醒 hlt,不影响功耗模型。 */
+        if (ui_exp_refresh_on()) {
+            static unsigned int last_frame;
+            unsigned int frame = timer_ticks() * 30u / 100u;
+
+            if (frame != last_frame) {
+                last_frame = frame;
+                ui_draw();
+            }
+        }
+
+        /* 每秒刷新任务栏时钟（内部判断秒没变就直接返回） */
+        ui_clock_tick();
 
         if (c < 0) {
             hlt();                  /* 都没事件就睡，中断会唤醒 */
@@ -527,6 +642,13 @@ void shell_run(void)
 
         if (c == 0)
             continue;
+
+        /* Win 键：唤起/收起任务栏（任何状态下都响应） */
+        if (c == KEY_WIN) {
+            desktop_taskbar_toggle();
+            ui_refresh();
+            continue;
+        }
 
         /* 有 UI 窗口时进入模态，按键交给窗口 */
         if (ui_active()) {

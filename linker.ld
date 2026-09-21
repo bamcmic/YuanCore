@@ -26,6 +26,12 @@ SECTIONS
         *(.data)
     }
 
+    /* IDT 独占页：初始化后设为只读，任何对它的写都会在肇事者现场页错误 */
+    .idtpage BLOCK(4K) : ALIGN(4K)
+    {
+        *(.idtpage)
+    }
+
     .bss BLOCK(4K) : ALIGN(4K)
     {
         *(COMMON)

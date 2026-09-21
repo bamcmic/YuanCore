@@ -89,6 +89,8 @@ static void handle_extended(unsigned char code)
     case 0x4F: buf_push(KEY_END);     break;
     case 0x49: buf_push(KEY_PGUP);    break;
     case 0x51: buf_push(KEY_PGDOWN);  break;
+    case 0x5B: buf_push(KEY_WIN);     break;   /* 左 Win */
+    case 0x5C: buf_push(KEY_WIN);     break;   /* 右 Win */
     default:   break;                 /* 其余扩展键忽略 */
     }
 }

@@ -52,4 +52,18 @@ int          theme_preset(const char *name);
 const char  *theme_first_preset(void);               /* 遍历用，返回第一个名字 */
 const char  *theme_next_preset(const char *cur);     /* 没有下一个返回 0 */
 
+/* ---- 非颜色选项（同样持久化到 /settings.cfg） ---- */
+
+/* 壁纸样式：0=渐变(默认) 1=纯色(用 bg_top) 2=渐变+点阵纹理 */
+#define THEME_WP_GRADIENT 0
+#define THEME_WP_SOLID    1
+#define THEME_WP_DOTS     2
+
+int          theme_bg_style(void);
+void         theme_set_bg_style(int style);          /* 越界自动取最近合法值 */
+
+/* 任务栏时钟开关（默认开） */
+int          theme_clock_show(void);
+void         theme_set_clock_show(int on);
+
 #endif /* THEME_H */

@@ -76,6 +76,30 @@ void paging_init(void)
 
         __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
         cr0 |= 0x80000000u;                 /* CR0.PG */
+        cr0 |= 0x00010000u;                 /* CR0.WP：ring0 也受只读页约束！
+                                             * x86 复位后 WP=0，内核写 RO 页会
+                                             * 被静默放行——之前的 IDT 只读陷阱
+                                             * 因此完全无效。 */
         __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0));
     }
+}
+
+/* 把 [start, start+len) 设为只读（内核态写也会触发页错误）。
+ * 用途：IDT 等关键结构的"踩内存报警器"——写它的代码会在自己的
+ * EIP 处页错误，panic 直接点名肇事函数。 */
+void paging_set_ro(unsigned int start, unsigned int len)
+{
+    unsigned int a, end = start + len;
+
+    start &= ~0xFFFu;
+    end = (end + 0xFFFu) & ~0xFFFu;
+
+    for (a = start; a < end; a += 4096) {
+        unsigned int pde = page_dir[a >> 22];
+        unsigned int *pt = (unsigned int *)(unsigned long)(pde & ~0xFFFu);
+
+        pt[(a >> 12) & 0x3FFu] &= ~PAGE_RW;
+    }
+
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(page_dir));   /* 刷 TLB */
 }

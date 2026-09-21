@@ -44,11 +44,21 @@ static int last_exit;
 int exec_last_status(void) { return last_exit; }
 void exec_set_exit(int code) { last_exit = code; }
 
+/* 稳定性闸门：ring3 切换路径存在两次未定位根因的内核态踩踏史
+ * （IDT 门被覆盖，见 TECHNICAL.md）。默认禁用，settings exp exec on 启用。 */
+static int exec_enabled;
+
+int exec_enabled_get(void) { return exec_enabled; }
+void exec_set_enabled(int on) { exec_enabled = (on != 0); }
+
 int exec_run(const char *path)
 {
     int size, i;
     unsigned char *img;
     unsigned int entry, phoff, phnum, phentsize;
+
+    if (exec_enabled == 0)
+        return EXEC_DISABLED;
 
     if (!fs_exists(path))
         return EXEC_NOTFOUND;

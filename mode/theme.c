@@ -9,6 +9,8 @@
 #include "fs.h"
 
 static unsigned int colors[THEME_COLOR_COUNT];
+static int bg_style = THEME_WP_GRADIENT;
+static int clock_show = 1;
 
 static const unsigned int defaults[THEME_COLOR_COUNT] = {
     /* BG_TOP */        0x1B3A5C,
@@ -200,6 +202,23 @@ const char *theme_next_preset(const char *cur)
     return 0;
 }
 
+/* ---- 非颜色选项 ---- */
+
+int theme_bg_style(void) { return bg_style; }
+
+void theme_set_bg_style(int style)
+{
+    if (style < THEME_WP_GRADIENT)
+        style = THEME_WP_GRADIENT;
+    if (style > THEME_WP_DOTS)
+        style = THEME_WP_DOTS;
+    bg_style = style;
+}
+
+int theme_clock_show(void) { return clock_show; }
+
+void theme_set_clock_show(int on) { clock_show = (on != 0); }
+
 /* ---- 持久化：/settings.cfg，每行 "key=RRGGBB" ---- */
 
 #define THEME_CFG_PATH "/settings.cfg"
@@ -211,9 +230,28 @@ static void buf_put(char *buf, int max, int *off, const char *s)
     buf[*off] = '\0';
 }
 
+static void uitoa(int v, char *out)
+{
+    char tmp[12];
+    int i = 0, j = 0;
+
+    if (v == 0) {
+        out[0] = '0';
+        out[1] = '\0';
+        return;
+    }
+    while (v > 0) {
+        tmp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (i > 0)
+        out[j++] = tmp[--i];
+    out[j] = '\0';
+}
+
 int theme_save(void)
 {
-    char buf[640];
+    char buf[768];
     int i, off = 0;
 
     if (!fs_ready())
@@ -228,6 +266,21 @@ int theme_save(void)
         buf_put(buf, sizeof buf, &off, "\n");
     }
 
+    /* 非颜色选项 */
+    {
+        char v[12];
+
+        uitoa(bg_style, v);
+        buf_put(buf, sizeof buf, &off, "bg_style=");
+        buf_put(buf, sizeof buf, &off, v);
+        buf_put(buf, sizeof buf, &off, "\n");
+
+        uitoa(clock_show ? 1 : 0, v);
+        buf_put(buf, sizeof buf, &off, "clock=");
+        buf_put(buf, sizeof buf, &off, v);
+        buf_put(buf, sizeof buf, &off, "\n");
+    }
+
     return fs_write(THEME_CFG_PATH, buf, off);
 }
 
@@ -239,11 +292,23 @@ static int hex_val(char c)
     return -1;
 }
 
-/* 逐行解析 "key=RRGGBB"，只认认识的键，坏行忽略 */
+static int parse_dec(const char *s)
+{
+    int v = 0, n = 0;
+
+    while (s[n] >= '0' && s[n] <= '9') {
+        v = v * 10 + (s[n] - '0');
+        n++;
+    }
+    return (n > 0) ? v : -1;
+}
+
+/* 逐行解析。颜色行 "key=RRGGBB"，选项行 "bg_style=N" / "clock=0|1"，
+ * 不认识的键静默忽略（向前兼容）。 */
 static int parse_line(const char *buf, int start, int end)
 {
     char name[32];
-    int n = 0, t, i, rgb = 0;
+    int n = 0, t;
 
     while (start + n < end && buf[start + n] != '=')
         n++;
@@ -254,18 +319,34 @@ static int parse_line(const char *buf, int start, int end)
         name[t] = buf[start + t];
     name[t] = '\0';
 
-    for (i = 0; i < 6; i++) {
-        int d = hex_val(buf[start + n + 1 + i]);
+    if (str_eq(name, "bg_style")) {
+        int v = parse_dec(buf + start + n + 1);
 
-        if (d < 0)
-            return -1;
-        rgb = (rgb << 4) | d;
+        if (v >= 0)
+            theme_set_bg_style(v);
+        return 0;
+    }
+    if (str_eq(name, "clock")) {
+        theme_set_clock_show(buf[start + n + 1] == '1');
+        return 0;
     }
 
-    for (i = 0; i < THEME_COLOR_COUNT; i++) {
-        if (str_eq(name, theme_key_name(i))) {
-            colors[i] = (unsigned int)rgb;
-            return 0;
+    {
+        int i, rgb = 0;
+
+        for (i = 0; i < 6; i++) {
+            int d = hex_val(buf[start + n + 1 + i]);
+
+            if (d < 0)
+                return -1;
+            rgb = (rgb << 4) | d;
+        }
+
+        for (i = 0; i < THEME_COLOR_COUNT; i++) {
+            if (str_eq(name, theme_key_name(i))) {
+                colors[i] = (unsigned int)rgb;
+                return 0;
+            }
         }
     }
     return -1;

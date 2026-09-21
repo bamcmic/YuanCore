@@ -4,11 +4,14 @@
  * 第 6 个参数（仅 button 的 active）压在用户栈顶。
  * 下标一旦发布就不能变，只能在表尾追加。
  *
- * 构建（WSL，gcc）：
- *   gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c hello.c -o hello.o
+ * 构建（WSL，gcc）—— **必须带 -mno-sse 系**：qemu-system-i386 默认 CPU
+ * 没有 SSE2，clang/gcc 若编出 SSE 指令，用户态第一条就 #UD 崩溃：
+ *   gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 \
+ *       -mno-sse -mno-sse2 -mno-mmx -msoft-float -c hello.c -o hello.o
  *   ld  -m elf_i386 -e app_main -Ttext-segment=0x400000 -o hello.app hello.o
  * 或（zig）：
  *   zig cc -target x86-freestanding -ffreestanding -nostdlib -O2 \
+ *       -mno-sse -mno-sse2 -mno-mmx -msoft-float \
  *       -Wl,--image-base=0x400000 -Wl,-e,app_main -o hello.app hello.c
  */
 #ifndef YCAPI_H
@@ -31,7 +34,16 @@ enum {
     YC_CURSOR,        /* void yc_cursor(&x,&y)        光标绝对位置           */
     YC_WAIT_EVENT,    /* int  yc_wait_event(&key,&dx,&dy,&btn) 1键 2鼠标    */
     YC_PRINT_DEC,     /* void yc_print_dec(int)                             */
-    YC_EXIT = 18      /* void yc_exit(int code)         不返回              */
+    YC_EXIT = 18,     /* void yc_exit(int code)         不返回              */
+    YC_CLOSE_ALL = 19,/* void yc_close_all(void)        关闭所有 UI 窗口    */
+    YC_RANDOM = 20,   /* unsigned yc_random(void)       32位伪随机数        */
+    YC_TICKS = 21,    /* unsigned yc_ticks(void)        PIT tick 数(100Hz)  */
+    YC_SLEEP_TICKS = 22, /* void yc_sleep_ticks(n)      内核 hlt 等 n 个tick*/
+    YC_PUTPIXEL = 23, /* void yc_putpixel(x,y,0x00RRGGBB)                    */
+    YC_REG_COUNT = 24,/* int   yc_app_count(void)        应用注册表条目数     */
+    YC_REG_NAME = 25, /* void  yc_app_name(idx,buf,max)  拷出应用名           */
+    YC_REG_DESC = 26, /* void  yc_app_desc(idx,buf,max)  拷出描述             */
+    YC_TERM_SHOW = 27 /* void  yc_term_show(on)          显隐 shell 终端窗口  */
 };
 
 #define YC_KEY_ENTER 10
@@ -124,6 +136,18 @@ static inline void yc_cursor(int *x, int *y)
 static inline int  yc_wait_event(int *key, int *dx, int *dy, int *btn)
 { return yc_syscall4(YC_WAIT_EVENT, (int)key, (int)dx, (int)dy, (int)btn); }
 static inline void yc_print_dec(int v)          { yc_syscall1(YC_PRINT_DEC, v); }
+static inline void yc_close_all(void)           { yc_syscall0(YC_CLOSE_ALL); }
+static inline unsigned int yc_random(void)      { return (unsigned int)yc_syscall0(YC_RANDOM); }
+static inline unsigned int yc_ticks(void)       { return (unsigned int)yc_syscall0(YC_TICKS); }
+static inline void yc_sleep_ticks(unsigned int n) { yc_syscall1(YC_SLEEP_TICKS, (int)n); }
+static inline void yc_putpixel(int x, int y, unsigned int c)
+{ yc_syscall3(YC_PUTPIXEL, x, y, (int)c); }
+static inline int  yc_app_count(void)           { return yc_syscall0(YC_REG_COUNT); }
+static inline void yc_app_name(int idx, char *buf, int max)
+{ yc_syscall3(YC_REG_NAME, idx, (int)buf, max); }
+static inline void yc_app_desc(int idx, char *buf, int max)
+{ yc_syscall3(YC_REG_DESC, idx, (int)buf, max); }
+static inline void yc_term_show(int on)         { yc_syscall1(YC_TERM_SHOW, on); }
 static inline void yc_exit(int code)            { yc_syscall1(YC_EXIT, code); }
 
 #endif /* YCAPI_H */

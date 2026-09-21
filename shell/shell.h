@@ -22,6 +22,11 @@ struct shell_command {
 void shell_init(void);
 void shell_run(void);                       /* 不返回 */
 
+/* 注册任务栏时钟的文本提供者(RTC,坏了退回 uptime)。
+ * 必须在第一次 desktop_draw() 之前调用——晚了的话，开机首帧会把
+ * 版本文字画在"无时钟"位置，之后局部合成再也擦不掉（文字重叠教训）。 */
+void shell_install_clock(void);
+
 void shell_register_command(const struct shell_command *cmd);
 
 /* 供命令模块重绘整个 UI（改主题后调用） */

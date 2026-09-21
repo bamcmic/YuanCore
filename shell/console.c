@@ -11,6 +11,7 @@
 #include "../mode/fb.h"
 #include "../mode/font.h"
 #include "../mode/theme.h"
+#include "../mode/desktop.h"
 
 #define CELL_W 8
 #define CELL_H 18
@@ -45,6 +46,9 @@ static void redraw(void)
     unsigned int bg = theme_get(THEME_CONSOLE_BG);
     int r, c;
 
+    if (desktop_terminal_visible() == 0)
+        return;                     /* 终端窗口关着：只养缓冲，不上屏 */
+
     fb_fillrect(cx, cy, cols * CELL_W, rows * CELL_H, bg);
     for (r = 0; r < rows; r++) {
         for (c = 0; c < cols; c++) {
@@ -59,6 +63,41 @@ static void redraw(void)
 void console_redraw(void)
 {
     redraw();
+}
+
+void console_repaint_region(int x, int y, int w, int h)
+{
+    unsigned int fg = theme_get(THEME_CONSOLE_FG);
+    unsigned int bg = theme_get(THEME_CONSOLE_BG);
+    int c0, c1, r0, r1, r, c;
+
+    if (w <= 0 || h <= 0)
+        return;
+    if (desktop_terminal_visible() == 0)
+        return;                     /* 终端窗口关着：这块就是壁纸 */
+    if (x + w <= cx || x >= cx + cols * CELL_W)
+        return;                          /* 与控制台不相交 */
+    if (y + h <= cy || y >= cy + rows * CELL_H)
+        return;
+
+    c0 = (x > cx) ? (x - cx) / CELL_W : 0;
+    c1 = (x + w - cx + CELL_W - 1) / CELL_W;
+    if (c1 > cols) c1 = cols;
+    r0 = (y > cy) ? (y - cy) / CELL_H : 0;
+    r1 = (y + h - cy + CELL_H - 1) / CELL_H;
+    if (r1 > rows) r1 = rows;
+
+    for (r = r0; r < r1; r++) {
+        fb_fillrect(cx + c0 * CELL_W, cy + r * CELL_H,
+                    (c1 - c0) * CELL_W, CELL_H, bg);
+        for (c = c0; c < c1; c++) {
+            char ch2 = cell_ch[r][c];
+
+            if (ch2 == 0 || ch2 == ' ')
+                continue;
+            font_drawchar(cx + c * CELL_W, cy + r * CELL_H, ch2, fg, 1);
+        }
+    }
 }
 
 static void scroll_up(void)
@@ -108,8 +147,9 @@ void console_putc(char c)
         if (cur_col > 0) {
             cur_col--;
             cell_ch[cur_row][cur_col] = 0;
-            font_drawchar(cx + cur_col * CELL_W, cy + cur_row * CELL_H,
-                          ' ', bg, 1);
+            if (desktop_terminal_visible() != 0)
+                font_drawchar(cx + cur_col * CELL_W, cy + cur_row * CELL_H,
+                              ' ', bg, 1);
         }
         return;
     default:
@@ -122,8 +162,9 @@ void console_putc(char c)
             cur_row = rows - 1;
         }
         cell_ch[cur_row][cur_col] = c;
-        font_drawchar(cx + cur_col * CELL_W, cy + cur_row * CELL_H,
-                      c, fg, 1);
+        if (desktop_terminal_visible() != 0)
+            font_drawchar(cx + cur_col * CELL_W, cy + cur_row * CELL_H,
+                          c, fg, 1);
         cur_col++;
         return;
     }

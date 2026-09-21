@@ -43,8 +43,23 @@ void ui_key(int key);
 
 /* --- 鼠标 --- */
 void ui_mouse_init(void);
-/* 喂一个鼠标事件：移动光标，左键点击命中按钮则聚焦并触发 */
+/* 喂一个鼠标事件：移动光标；点击命中按钮/图标/Start/× 并触发 */
 void ui_mouse(int dx, int dy, int btn);
+
+/* 桌面点击启动回调：图标(0=Files 1=Terminal 2=Settings 3=About)与 4=Start。
+ * 由 shell 设置；ui 在无窗口状态下点击桌面时调用。 */
+void ui_set_launch(void (*fn)(int id));
+
+/* 实验性选项（settings exp / 设置窗口 Experimental 选项卡配置） */
+void ui_exp_drag(int on);        /* 窗口拖动总开关（默认开） */
+void ui_exp_snap(int on);        /* 拖动贴边吸附（默认关） */
+int  ui_exp_drag_on(void);
+int  ui_exp_snap_on(void);
+void ui_exp_refresh(int on);     /* 全局刷新 ~30fps（默认关，性能开销大） */
+int  ui_exp_refresh_on(void);
+
+/* 每秒任务栏时钟刷新（shell 主循环里调用；内部判断秒是否变化） */
+void ui_clock_tick(void);
 
 /* 恢复桌面+终端，再画上窗口。程序改了主题之类的全局观感后调用。 */
 void ui_refresh(void);
@@ -64,6 +79,10 @@ void ui_button(int x, int y, int w, int h, const char *text, int idx);
 void ui_draw_button(int x, int y, int w, int h, const char *text, int active);
 void ui_label(int x, int y, const char *text);
 void ui_panel(int x, int y, int w, int h, unsigned int color);
+
+/* 只登记点击命中区、不绘制（自绘控件如选项卡用）。
+ * 命中后当前窗口 focus 被设为 idx,并触发一次 KEY_ENTER。 */
+void ui_note_button(int x, int y, int w, int h, int idx);
 
 /* --- 供用户程序系统调用使用的服务 --- */
 void ui_cursor_get(int *x, int *y);

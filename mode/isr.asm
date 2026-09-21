@@ -46,7 +46,14 @@ isr_common:
     push fs
     push gs
     cld
-    push esp                    ; 参数: struct registers *（指向 gs）
+    ; 内核态必须用自己的段：ring3 程序跑过之后 ds/es/fs/gs 会残留 0x23，
+    ; flat 模型下虽能访问，但这是被证明的错误状态 —— 一律重载。
+    mov  ax, 0x10
+    mov  ds, ax
+    mov  es, ax
+    mov  fs, ax
+    mov  gs, ax
+    push esp                    ; 参数: struct registers *（指向保存的 gs）
     call isr_dispatch
     add  esp, 4                 ; 丢掉参数
     pop  gs
@@ -64,6 +71,11 @@ irq_common:
     push fs
     push gs
     cld
+    mov  ax, 0x10
+    mov  ds, ax
+    mov  es, ax
+    mov  fs, ax
+    mov  gs, ax
     push esp
     call irq_dispatch
     add  esp, 4

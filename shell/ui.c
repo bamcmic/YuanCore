@@ -14,6 +14,9 @@
 #include "../mode/kbd.h"
 #include "../mode/mouse.h"
 #include "../mode/io.h"
+#include "../mode/timer.h"
+#include "../mode/tss.h"
+#include "../mode/idt.h"
 #include "../mode/fb.h"
 #include "../mode/font.h"
 #include "../mode/theme.h"
@@ -48,8 +51,15 @@ static int btn_n;
 /* 光标状态 */
 #define CUR_W 9
 #define CUR_H 14
+/* 箭头的黑色投影偏移 +1，画在 CUR_W x CUR_H 之外 ——
+ * 保存块必须比箭头大一圈，否则每次移动都在右/下留 1px 黑线（拖影） */
+#define SAVE_W (CUR_W + 1)
+#define SAVE_H (CUR_H + 1)
 static int mx, my, mouse_ready;
-static unsigned char cursor_saved[CUR_W * CUR_H * 4];
+static int cursor_visible;      /* 没画过就绝不擦——否则首次擦除会把
+                                 * 全零的黑块写上屏（就是那条"莫名黑线"） */
+static int saved_w, saved_h;    /* 实际保存的宽高（屏幕边缘处会被裁剪） */
+static unsigned char cursor_saved[SAVE_H][SAVE_W * 4];
 
 static void mark_dirty(void) { dirty = 1; }
 
@@ -70,32 +80,48 @@ static const char *cursor_bmp[CUR_H] = {
     "....X#X.."
 };
 
-/* 把指定矩形读进缓存 */
+/* 把光标矩形（含投影的 SAVE_W x SAVE_H）整块读进缓存，逐行按 pitch 走。
+ * 屏幕边缘处裁剪实际保存范围，restore 用同一组范围写回。 */
 static void region_save(int x, int y)
 {
-    volatile unsigned char *src = fb.addr
-        + (unsigned int)y * fb.pitch + (unsigned int)x * 4;
-    volatile unsigned int *s = (volatile unsigned int *)src;
-    int i, n = CUR_W * CUR_H;
+    int r, c;
 
+    saved_w = 0;
+    saved_h = 0;
     if (fb.bpp != 32)
         return;
-    for (i = 0; i < n; i++)
-        ((unsigned int *)cursor_saved)[i] = s[i];
-    (void)x; (void)y;
+
+    saved_w = (int)fb.width - x;
+    if (saved_w > SAVE_W) saved_w = SAVE_W;
+    saved_h = (int)fb.height - y;
+    if (saved_h > SAVE_H) saved_h = SAVE_H;
+    if (saved_w <= 0 || saved_h <= 0) {
+        saved_w = saved_h = 0;
+        return;
+    }
+
+    for (r = 0; r < saved_h; r++) {
+        volatile unsigned int *s = (volatile unsigned int *)
+            (fb.addr + (unsigned int)(y + r) * fb.pitch + (unsigned int)x * 4);
+
+        for (c = 0; c < saved_w; c++)
+            ((unsigned int *)cursor_saved)[r * SAVE_W + c] = s[c];
+    }
 }
 
 static void region_restore(int x, int y)
 {
-    volatile unsigned int *d = (volatile unsigned int *)
-        (fb.addr + (unsigned int)y * fb.pitch + (unsigned int)x * 4);
-    int i, n = CUR_W * CUR_H;
+    int r, c;
 
-    if (fb.bpp != 32)
+    if (fb.bpp != 32 || saved_w <= 0 || saved_h <= 0)
         return;
-    for (i = 0; i < n; i++)
-        d[i] = ((unsigned int *)cursor_saved)[i];
-    (void)x; (void)y;
+    for (r = 0; r < saved_h; r++) {
+        volatile unsigned int *d = (volatile unsigned int *)
+            (fb.addr + (unsigned int)(y + r) * fb.pitch + (unsigned int)x * 4);
+
+        for (c = 0; c < saved_w; c++)
+            d[c] = ((unsigned int *)cursor_saved)[r * SAVE_W + c];
+    }
 }
 
 static void cursor_paint(void)
@@ -122,13 +148,15 @@ static void cursor_paint(void)
                 fb_putpixel(mx + c, my + r, RGB(0xFF, 0xFF, 0xFF));
         }
     }
+    cursor_visible = 1;
 }
 
 static void cursor_erase(void)
 {
-    if (mouse_ready == 0)
+    if (mouse_ready == 0 || cursor_visible == 0)
         return;
     region_restore(mx, my);
+    cursor_visible = 0;
 }
 
 void ui_mouse_init(void)
@@ -136,6 +164,89 @@ void ui_mouse_init(void)
     mx = (int)fb.width / 2;
     my = (int)fb.height / 2;
     mouse_ready = (fb.bpp == 32);
+    cursor_visible = 0;
+}
+
+/* ---- 桌面点击启动 ---- */
+
+static void (*launch_fn)(int id);
+
+void ui_set_launch(void (*fn)(int id))
+{
+    launch_fn = fn;
+}
+
+/* ---- 窗口拖动（按住标题栏移动） ---- */
+
+static int drag_win = -1;
+static int drag_offx, drag_offy;
+
+/* 实验性开关：拖动总开关 / 贴边吸附（settings exp 配置） */
+static int exp_drag = 1;
+static int exp_snap;
+
+#define DRAG_SNAP 16
+
+void ui_exp_drag(int on) { exp_drag = (on != 0); }
+void ui_exp_snap(int on) { exp_snap = (on != 0); }
+int  ui_exp_drag_on(void) { return exp_drag; }
+int  ui_exp_snap_on(void) { return exp_snap; }
+
+/* 实验性:全局刷新。开启后 shell 主循环按 ~30fps 调 ui_draw() 整屏重绘。
+ * QEMU(TCG) 下整屏重绘约几十毫秒,30fps 会明显拖慢交互 —— 诊断/演示用。 */
+static int exp_refresh;
+
+void ui_exp_refresh(int on) { exp_refresh = (on != 0); }
+int  ui_exp_refresh_on(void) { return exp_refresh; }
+
+/* ---- 每秒时钟 ---- */
+
+void ui_clock_tick(void)
+{
+    static unsigned int last_sec = 0xFFFFFFFF;
+    unsigned int sec = timer_ticks() / 100;   /* PIT 100Hz */
+    static int canary_warned;
+
+    if (tss_canary_ok() == 0 && canary_warned == 0) {
+        canary_warned = 1;
+        console_puts("\n[!!!] KERNEL IRQ STACK OVERFLOWED - about to die\n");
+    }
+
+    /* IDT 完整性巡检：被踩立刻喊出（配合只读页，写它的代码会在自己
+     * 的 EIP 处页错误——两条线索一起锁定肇事函数） */
+    {
+        static int idt_warned;
+
+        if (idt_verify() != 0 && idt_warned == 0) {
+            idt_warned = 1;
+            console_puts("\n[!!!] IDT CORRUPTED - gate was overwritten\n");
+        }
+    }
+
+    if (sec == last_sec)
+        return;
+    last_sec = sec;
+
+    if (theme_clock_show() == 0 || desktop_clock_ready() == 0)
+        return;
+
+    /* 时钟区可能被光标压着，先擦再画再补 */
+    cursor_erase();
+    desktop_draw_clock();
+    cursor_paint();
+}
+
+/* ---- 屏幕合成器 ----
+ *
+ * 分层:桌面(desktop.c) → 控制台(console.c) → 模态窗口 → 光标。
+ * compose_region 把一个矩形从各层"按 z 序重新合成"出来。
+ * 无窗口时擦光标 = 纯合成,零备份、零残影;有窗口时窗口静止,
+ * 仍走备份恢复(窗口小,备份准确且便宜)。
+ */
+static void compose_region(int x, int y, int w, int h)
+{
+    desktop_repaint_region(x, y, w, h);
+    console_repaint_region(x, y, w, h);
 }
 
 void ui_mouse(int dx, int dy, int btn)
@@ -151,29 +262,119 @@ void ui_mouse(int dx, int dy, int btn)
     if (ny + CUR_H > (int)fb.height) ny = (int)fb.height - CUR_H;
 
     if (nx != mx || ny != my) {
-        cursor_erase();
+        int ox = mx, oy = my;
+
+        if (drag_win < 0) {
+            if (top < 0) {
+                /* 合成器路径：上一个位置直接从各层重建 */
+                cursor_visible = 0;
+                compose_region(ox, oy, SAVE_W, SAVE_H);
+            } else {
+                cursor_erase();
+            }
+        }
         mx = nx;
         my = ny;
+
+        /* 按住标题栏拖动：窗口跟随，整屏重排（背景+窗口+光标） */
+        if (drag_win >= 0 && (btn & 1) != 0) {
+            int wx = mx - drag_offx, wy = my - drag_offy;
+
+            if (wx < 0) wx = 0;
+            if (wy < 0) wy = 0;
+            if (wx + wins[drag_win].w > (int)fb.width)
+                wx = (int)fb.width - wins[drag_win].w;
+            if (wy + wins[drag_win].h > (int)fb.height)
+                wy = (int)fb.height - wins[drag_win].h;
+
+            if (exp_snap != 0) {
+                /* 贴边吸附：距任一屏缘 DRAG_SNAP 内则吸齐 */
+                if (wx < DRAG_SNAP)                                wx = 0;
+                if (wy < DRAG_SNAP)                                wy = 0;
+                if (wx + wins[drag_win].w > (int)fb.width - DRAG_SNAP)
+                    wx = (int)fb.width - wins[drag_win].w;
+                if (wy + wins[drag_win].h > (int)fb.height - DRAG_SNAP)
+                    wy = (int)fb.height - wins[drag_win].h;
+            }
+
+            wins[drag_win].x = wx;
+            wins[drag_win].y = wy;
+            ui_draw();
+            last_btn = btn;
+            return;
+        }
         cursor_paint();
     }
 
-    /* 左键按下沿：命中按钮 → 聚焦并触发 */
-    if ((btn & 1) != 0 && (last_btn & 1) == 0 && top >= 0 && btn_n > 0) {
-        for (i = 0; i < btn_n; i++) {
-            if (mx >= btn_x[i] && mx < btn_x[i] + btn_w[i]
-                && my >= btn_y[i] && my < btn_y[i] + btn_h[i]) {
-                wins[top].focus = i;
-                mark_dirty();
-                ui_draw();
-                if (wins[top].on_key != 0)
-                    wins[top].on_key(top, KEY_ENTER);
-                if (dirty)
-                    ui_draw();
-                break;
-            }
-        }
+    /* 左键松开：结束拖动 */
+    if ((btn & 1) == 0) {
+        if ((last_btn & 1) != 0)
+            drag_win = -1;
+        last_btn = btn;
+        return;
+    }
+    if ((last_btn & 1) != 0) {
+        last_btn = btn;
+        return;                     /* 按住中的移动：上面已处理 */
     }
     last_btn = btn;
+
+    /* --- 有窗口：× 关闭钮 → 按钮 → 标题栏拖动 --- */
+    if (top >= 0) {
+        if (desktop_close_hit(wins[top].x, wins[top].y,
+                              wins[top].w, wins[top].h, mx, my)) {
+            ui_close(top);
+            return;
+        }
+        if (btn_n > 0) {
+            for (i = 0; i < btn_n; i++) {
+                if (mx >= btn_x[i] && mx < btn_x[i] + btn_w[i]
+                    && my >= btn_y[i] && my < btn_y[i] + btn_h[i]) {
+                    wins[top].focus = i;
+                    ui_draw();
+                    if (wins[top].on_key != 0)
+                        wins[top].on_key(top, KEY_ENTER);
+                    if (dirty)
+                        ui_draw();
+                    return;
+                }
+            }
+        }
+        /* 标题栏（避开 × 和边框）：开始拖动（实验开关 exp_drag 可禁用） */
+        if (exp_drag != 0
+            && mx >= wins[top].x + 1 && mx < wins[top].x + wins[top].w - 1
+            && my >= wins[top].y + 1 && my < wins[top].y + 1 + TITLE_H) {
+            drag_win = top;
+            drag_offx = mx - wins[top].x;
+            drag_offy = my - wins[top].y;
+        }
+        return;                     /* 窗口内其它区域：不穿透 */
+    }
+
+    /* --- 无窗口：任务栏提示条 / 终端 × / 图标 / Start --- */
+    if (desktop_taskbar_edge_hit(mx, my)) {
+        desktop_taskbar_toggle();
+        ui_refresh();
+        return;
+    }
+    if (desktop_terminal_visible() != 0
+        && desktop_close_hit(SHELL_WIN_X, SHELL_WIN_Y,
+                             SHELL_WIN_W, SHELL_WIN_H, mx, my)) {
+        desktop_terminal_show(0);   /* 关闭 YuanCore Shell 窗口 */
+        ui_refresh();
+        return;
+    }
+
+    if (launch_fn == 0)
+        return;
+
+    i = desktop_icon_hit(mx, my);
+    if (i >= 0) {
+        launch_fn(i);
+        return;
+    }
+    if (desktop_start_hit(mx, my))
+        launch_fn(4);
 }
 
 static void restore_background(void)
@@ -433,6 +634,19 @@ void ui_button(int x, int y, int w, int h, const char *text, int idx)
     }
 
     ui_draw_button(x, y, w, h, text, idx == ui_focus());
+}
+
+/* 自绘控件(选项卡等)只登记命中区:命中后 focus=idx 并派发 KEY_ENTER */
+void ui_note_button(int x, int y, int w, int h, int idx)
+{
+    (void)idx;                  /* 命中派发用数组序号,登记顺序须与 idx 一致 */
+    if (current >= 0 && btn_n < UI_MAX_BUTTONS) {
+        btn_x[btn_n] = x;
+        btn_y[btn_n] = y;
+        btn_w[btn_n] = w;
+        btn_h[btn_n] = h;
+        btn_n++;
+    }
 }
 
 /* ---- 鼠标光标/事件（供用户程序经系统调用使用） ---- */
