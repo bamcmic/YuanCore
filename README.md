@@ -47,7 +47,7 @@ ELF 加载器、系统调用、文件系统、鼠标与窗口系统,全部手写
 需要 WSL(Ubuntu,装好 `gcc-multilib nasm grub-pc-bin xorriso qemu-system-i386`):
 
 ```bash
-cd ~/myos
+cd ~/YuanCore
 make run      # 构建并启动 QEMU
 ```
 
