@@ -36,6 +36,7 @@
 
 /* panic 时控制台可能还没就绪：图形模式画到屏幕上，文本模式写 0xB8000。
  * （教训：曾只在文本模式打 panic，图形模式下一出错就是无声黑屏。） */
+#ifndef YC_X64
 void fmt_hex(unsigned int v, char *out)
 {
     static const char *d = "0123456789ABCDEF";
@@ -190,12 +191,15 @@ void print_panic(const struct registers *r)
     printf("eflags     : 0x%X\n", r->eflags);
     printf("\nSystem halted.\n");
 }
+#endif /* !YC_X64 */
+
+#ifndef YC_X64
+void kernel_main_common(const struct multiboot_info *mbi);
 
 void kmain(unsigned int magic, unsigned int mbi_addr)
 {
     const struct multiboot_info *mbi =
         (const struct multiboot_info *)mbi_addr;
-    int rc;
 
     cli();                                 /* 装好 IDT 之前绝不能开中断 */
 
@@ -207,12 +211,44 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
             hlt();
     }
 
+    kernel_main_common(mbi);               /* 不返回 */
+}
+#endif /* !YC_X64 */
+
+/* 初始化与运行主流程:i386 入口(kmain)与 x86-64 入口(kernel64.c 的
+ * kmain64)在各自解析完引导信息后都汇入这里 —— 保证两条架构路径
+ * 的初始化顺序永远一致。 */
+void kernel_main_common(const struct multiboot_info *mbi)
+{
+    int rc;
+#if defined(YC_X64)
+    extern void gdt64_init(void);
+    extern void idt64_init(void);
+    extern void paging64_set_ro(unsigned long long start,
+                                unsigned long long len);
+    extern unsigned long long idt64_page_base(void);
+    extern void pic64_init(void);
+    extern void ser_puts64(const char *s);   /* kernel64.c:COM1 信标 */
+#else
+    extern unsigned int idt_page_base(void);
+#endif
+
+#if defined(YC_X64)
+    gdt64_init();
+    ser_puts64(" G");
+    idt64_init();
+    ser_puts64(" I");
+    paging64_set_ro(idt64_page_base(), 4096);  /* IDT 只读陷阱 */
+    pic64_init();
+    ser_puts64(" C");
+#else
     gdt_init();
     tss_init();                            /* ring3 中断切内核栈 */
     idt_init();
     paging_init();                         /* 开分页：此后只碰已映射区域 */
     paging_set_ro(idt_page_base(), 4096);  /* IDT 只读：写它 → 页错误点名肇事者 */
     irq_init();                            /* 重映射 PIC，只放行 IRQ0/1/2/12 */
+#endif
 
     pmm_init(mbi);
     heap_init();
@@ -225,19 +261,29 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
              "YuanCore ramfs\nFiles here live in memory only.\n", 48);
     fs_write("/docs/about.txt",
              "YuanCore - 32-bit x86 hobby kernel.\n", 37);
+#ifndef YC_X64
+    /* x86-64 版不迁移 ring3，不内置 .app(用户程序为 ELF32) */
     fs_write("/apps/hello.app", app_hello_blob, APP_HELLO_LEN);
     fs_write("/apps/closeall.app", app_closeall_blob, APP_CLOSEALL_LEN);
+#endif
 
     kbd_init();
     mouse_init();                          /* PS/2 鼠标，IRQ12 */
     timer_init(100);                       /* 100Hz，顺带验证中断链路 */
 
+#if defined(YC_X64)
+    ser_puts64(" f");                      /* 即将初始化帧缓冲 */
+#endif
     rc = fb_init(mbi);
     if (rc != 0) {
+#if defined(YC_X64)
+        ser_puts64(" FB-FAIL\r\n");
         sti();
+#endif
         vga_clear();
         vga_color(0x0F);
-        printf("YuanCore - i386 kernel\n\n");
+        printf("YuanCore - %s kernel\n\n",
+               (sizeof(void *) == 8) ? "x86-64" : "i386");
         printf("Framebuffer unavailable, fb_init() = %d\n", rc);
         printf("  mbi flag : 0x%X\n", (unsigned int)mbi->flags);
         printf("  fb type  : %d, bpp %d\n",
@@ -246,19 +292,41 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
         for (;;)
             hlt();
     }
+#if defined(YC_X64)
+    ser_puts64(" F\r\n");                  /* 帧缓冲就绪,开始画桌面 */
+    {
+        extern void paging64_walk_dump(unsigned long long va);
+        paging64_walk_dump(0xFD000000ull); /* 帧缓冲三级表项诊断 */
+        paging64_walk_dump(0x102000ull);   /* 内核代码区对照 */
+    }
+#endif
 
     /* ---- 图形路径 ---- */
     theme_init();
+#if defined(YC_X64)
+    ser_puts64(" t");
+#endif
     shell_install_clock();                 /* 时钟提供者必须先于首帧注册 */
+#if defined(YC_X64)
+    ser_puts64(" k");
+#endif
     desktop_draw(mbi);
+#if defined(YC_X64)
+    ser_puts64(" d");                      /* 桌面已画完 */
+#endif
 
     syscall_init();                        /* 程序用的服务表(固定地址) */
+#ifndef YC_X64
     isr_register(0x80, syscall_dispatch);  /* 系统调用门已在 IDT 里开 DPL3 */
+#endif
 
     console_init(SHELL_WIN_X + SHELL_PAD,
                  SHELL_WIN_Y + 36 + SHELL_PAD,      /* 36 = 标题栏高 */
                  SHELL_WIN_W - 2 * SHELL_PAD,
                  SHELL_WIN_H - 36 - 22 - 2 * SHELL_PAD);  /* 22 = 状态条高 */
+#if defined(YC_X64)
+    ser_puts64(" c");
+#endif
 
     {
         void *probe = kmalloc(64);
@@ -272,6 +340,9 @@ void kmain(unsigned int magic, unsigned int mbi_addr)
     console_puts("[ok ] type 'help' for commands\n\n");
 
     sti();
+#if defined(YC_X64)
+    ser_puts64(" S");                      /* 中断已开 */
+#endif
 
     /* 开机自检：等 200ms 看时钟 tick 是否前进。
      * 不动 = IRQ0 没进来（PIC/EOI/IDT 链路有问题），键盘必然也不响。 */

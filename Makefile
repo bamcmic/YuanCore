@@ -20,6 +20,27 @@ CFLAGS    = -m32 -ffreestanding -fno-pie -fno-stack-protector \
             -nostdlib -Wall -Wextra -O2 -MMD -MP
 LDFLAGS   = -m elf_i386 -T linker.ld -no-pie
 
+# ---- x86-64(EFI/长模式)目标 ----
+# GRUB 引导保持不变:Multiboot2 头 + 32 位入口桩切长模式。
+# ISO 同时含 BIOS 与 EFI 启动(需 grub-efi-amd64-bin + mtools)。
+X64_QEMU    = qemu-system-x86_64
+X64_NASM    = nasm -f elf64
+X64_CFLAGS  = -m64 -ffreestanding -fno-pie -fno-stack-protector -mno-red-zone \
+              -mno-sse -mno-sse2 -mno-mmx -msoft-float -DYC_X64 \
+              -I x64 -I mode \
+              -nostdlib -Wall -Wextra -O2 -MMD -MP
+X64_LDFLAGS = -m elf_x86_64 -T x64/linker64.ld -no-pie
+
+# x64 不编译的模块:32 位中断框架与 ring3(未迁移,见 TECHNICAL.md)
+X64_EXCLUDE = mode/gdt.c mode/idt.c mode/paging.c mode/tss.c mode/exec.c \
+              mode/irq.c
+X64_SRC_C   = $(filter-out $(X64_EXCLUDE),$(SRCS_C)) x64/kernel64.c \
+              x64/gdt64.c x64/idt64.c x64/paging64.c x64/irq64.c x64/exec64.c
+X64_SRC_ASM = x64/boot32.asm x64/isr64.asm
+X64_OBJS    = $(X64_SRC_C:.c=.o64) $(X64_SRC_ASM:.asm=.o64)
+X64_ELF     = mykernel64.elf
+X64_ISO     = YuanCore64.iso
+
 # 自动收集所有源文件
 #   *.c / *.asm            内核本体
 #   mode/                  内核模块
@@ -40,7 +61,45 @@ help:
 	@echo "make shot   - 无头截图到 shot.ppm（无显示服务器时用）"
 	@echo "make debug  - QEMU -s -S，等 gdb 连 :1234"
 	@echo "make apps   - 编译示例程序 apps/hello.app（需 gcc-multilib）"
+	@echo "make x64    - 构建 YuanCore64.iso（x86-64,GRUB BIOS+EFI 双启动）"
+	@echo "make run64  - QEMU x86-64 运行（BIOS 路径）"
+	@echo "make run-efi - QEMU x86-64 + OVMF 以 UEFI 启动（需 ovmf 包）"
 	@echo "make clean  - 清理全部构建产物"
+
+# ---- x64 规则 ----
+%.o64: %.c
+	$(GCC) $(X64_CFLAGS) -c $< -o $@
+
+%.o64: %.asm
+	$(X64_NASM) $< -o $@
+
+$(X64_ELF): $(X64_OBJS)
+	$(LD) $(X64_LDFLAGS) -o $@ $^
+
+$(X64_ISO): $(X64_ELF)
+	mkdir -p iso64/boot/grub
+	cp $(X64_ELF) iso64/boot/
+	echo 'set timeout=0' > iso64/boot/grub/grub.cfg
+	echo 'set default=0' >> iso64/boot/grub/grub.cfg
+	echo 'menuentry "YuanCore OS x86-64" {' >> iso64/boot/grub/grub.cfg
+	echo '  multiboot2 /boot/$(X64_ELF)' >> iso64/boot/grub/grub.cfg
+	echo '}' >> iso64/boot/grub/grub.cfg
+	$(GRUB) -o $@ iso64/
+
+x64: $(X64_ISO)
+
+run64: $(X64_ISO)
+	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} \
+		$(X64_QEMU) -m 256 -cdrom $(X64_ISO)
+
+# OVMF 固件路径按 Debian/Ubuntu 包默认;不同发行版可用 EFI_D= 指定
+EFI_D ?= /usr/share/OVMF
+run-efi: $(X64_ISO)
+	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} \
+		$(X64_QEMU) -m 256 -M q35 \
+		-drive if=pflash,format=raw,readonly=on,file=$(EFI_D)/OVMF_CODE.fd \
+		-drive if=pflash,format=raw,file=$(EFI_D)/OVMF_VARS.fd \
+		-cdrom $(X64_ISO)
 
 # 链接
 $(ELF): $(OBJS)
@@ -89,7 +148,8 @@ apps/closeall.app: apps/closeall.o
 # 清理
 clean:
 	rm -f $(OBJS) $(ELF) $(ISO) *.d mode/*.d shell/*.d print.o
-	rm -rf iso
+	rm -f $(X64_OBJS) $(X64_ELF) $(X64_ISO) x64/*.d *.o64
+	rm -rf iso iso64
 
 # 运行
 # WSLg 下有两个坑，这里一并绕开：
@@ -130,4 +190,4 @@ debug: $(ISO)
 # 包含自动生成的依赖文件（头文件变化时自动重编译）
 -include $(SRCS_C:.c=.d)
 
-.PHONY: all clean run debug shot wslg-check help apps
+.PHONY: all clean run debug shot wslg-check help x64 run64 run-efi apps

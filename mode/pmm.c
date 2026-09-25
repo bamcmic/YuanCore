@@ -100,7 +100,7 @@ void pmm_init(const struct multiboot_info *mbi)
         highest = (unsigned long long)MEM_CAP_MB * MB;
 
     /* 2) 位图紧跟内核镜像 */
-    bitmap  = (unsigned char *)(((unsigned int)(unsigned long)&kernel_end + 3) & ~3U);
+    bitmap  = (unsigned char *)(((unsigned long)&kernel_end + 3) & ~3UL);
     nframes = (unsigned int)(highest / PMM_FRAME);
     if (nframes == 0)
         return;

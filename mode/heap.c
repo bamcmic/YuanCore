@@ -40,10 +40,22 @@ void heap_init(void)
     free_list->prev = 0;
 }
 
+/* 中断临界区辅助:i386 与 x86-64 的 EFLAGS 压栈指令不同 */
+static inline unsigned int irq_save(void)
+{
+    unsigned long f;
+#if defined(__x86_64__)
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(f));
+#else
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(f));
+#endif
+    return (unsigned int)f;
+}
+
 void *kmalloc(unsigned int size)
 {
     struct block *b;
-    unsigned int flags = 0;
+    unsigned int flags;
     void *p = 0;
 
     if (size == 0 || heap_size == 0)
@@ -52,7 +64,7 @@ void *kmalloc(unsigned int size)
     size = ALIGN4(size);
 
     /* 堆可能在中断里被用，做个简单临界区 */
-    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
+    flags = irq_save();
 
     for (b = free_list; b != 0; b = b->next) {
         if (b->used)
@@ -91,14 +103,14 @@ void *kmalloc(unsigned int size)
 void kfree(void *ptr)
 {
     struct block *b;
-    unsigned int flags = 0;
+    unsigned int flags;
 
     if (ptr == 0 || heap_size == 0)
         return;
 
     b = (struct block *)((unsigned char *)ptr - BLOCK_HDR);
 
-    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
+    flags = irq_save();
 
     if ((unsigned char *)ptr - BLOCK_HDR < heap_start ||
         (unsigned char *)ptr > heap_start + heap_size) {

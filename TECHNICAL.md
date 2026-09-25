@@ -640,7 +640,7 @@ myos/
 
 ---
 
-## 9. 桌面形态与应用模型（v0.00.10）
+## 9. 桌面形态与应用模型（v0.6）
 
 ### 9.1 屏幕层级与任务栏
 
@@ -681,6 +681,30 @@ myos/
 
 ---
 
+## 9.5 x86-64 / EFI 迁移（进行中）
+
+GRUB 引导保持不变:GRUB 的 EFI 版同样支持 Multiboot2,因此引导器只换固件入口,不换软件。
+
+- **入口**:`x64/boot32.asm` —— Multiboot2 头(含 framebuffer 1024x768x32 请求)+
+  32 位入口桩:校验魔数(0x36D76289)→ 构建四级页表(PML4[0]->PDPT[0..3]->PD[0..2047],
+  2MB 大页恒等映射低 4GB,覆盖 0xFD000000 帧缓冲)→ PAE + EFER.LME + CR0.PG(+WP)→
+  ljmp 进 64 位代码 → 调 `kmain64`。
+- **信息适配**:`x64/kernel64.c` 解析 Multiboot2 tag(meminfo/mmap/framebuffer),
+  合成既有 multiboot1 风格的 `struct multiboot_info`(静态缓冲)——
+  fb/pmm/desktop 等模块零改动复用。
+- **C 层双构建**:同一份 C 源同时可编 i386 与 x86-64(`-DYC_X64`);
+  差异点用条件编译:GDT/IDT/PIC/分页各有 x64 专用实现
+  (`x64/gdt64.c idt64.c paging64.c irq64.c`),ring3(exec/switch/tss)不迁移。
+- **构建**:`make x64` 出 `YuanCore64.iso`(grub-mkrescue,含 BIOS+EFI 双启动,
+  EFI 需要 `grub-efi-amd64-bin` 与 `mtools`);`make run64` BIOS 路径,
+  `make run-efi` 走 OVMF(需 `ovmf` 包,`EFI_D=` 可指定固件目录)。
+- **内核编译旗标**:`-mno-red-zone`(中断不经内核栈红区必须关)
+  \ (-msoft-float)。
+- **未迁移**:ring3 程序执行(exec/switch/usermode)—— 见 10 节已知限制。
+- **汇编未离线验证**:boot32/isr64 为 nasm -f elf64,链接期才暴露;C 层已全量零警告。
+
+---
+
 ## 10. 已知限制
 
 - **ring3 程序执行默认禁用**（exec.c 稳定性闸门）：切换路径存在两次未定位
@@ -703,4 +727,4 @@ myos/
 
 ---
 
-*文档对应源码版本：0.00.10。改了架构记得同步这里。*
+*文档对应源码版本：0.6。改了架构记得同步这里。*

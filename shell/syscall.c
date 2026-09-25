@@ -21,8 +21,10 @@
 #include "../mode/timer.h"
 #include "../mode/io.h"
 #include "../mode/memmap.h"
+#ifndef YC_X64
 #include "../mode/exec.h"
 #include "../mode/usermode.h"
+#endif
 #include "../mode/desktop.h"
 #include "registry.h"
 
@@ -30,7 +32,8 @@
 
 static void *table[YC_MAX_SYSCALLS];
 
-/* 把内核侧字符串拷进用户缓冲（ring3 读不了内核段，不能直接给指针） */
+#ifndef YC_X64
+/* 把内核侧字符串拷进用户缓冲(ring3 读不了内核段,不能直接给指针) */
 static void copy_out(char *dst, int max, const char *src)
 {
     int i = 0;
@@ -47,6 +50,7 @@ static void copy_out(char *dst, int max, const char *src)
     }
     dst[i] = '\0';
 }
+#endif /* !YC_X64 */
 
 /* xorshift32：种子取自开机 tick，供程序用 yc_random() 取随机数 */
 static unsigned int rand_state;
@@ -106,6 +110,9 @@ void syscall_init(void)
         t[i] = table[i];
 }
 
+#ifndef YC_X64
+/* int 0x80 分发:x86-64 版暂不迁移 ring3 程序执行(见 exec.c 闸门),
+ * 该函数在 64 位构建下裁剪 —— 表(syscall_init)仍可用。 */
 void syscall_dispatch(struct registers *r)
 {
     unsigned int n = r->eax;
@@ -158,12 +165,15 @@ void syscall_dispatch(struct registers *r)
     case 27: desktop_terminal_show(a);
              ui_refresh();
              r->eax = 0; break;
+#ifndef YC_X64
     case 18:                                     /* YC_EXIT */
         exec_set_exit((int)a);
         user_exit();                             /* 不返回 */
         break;
+#endif
     default:
         r->eax = (unsigned int)-1;
         break;
     }
 }
+#endif /* !YC_X64 */

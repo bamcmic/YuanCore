@@ -8,11 +8,23 @@
 
 ```bash
 cd ~/myos
-make run        # 构建并启动 QEMU(需要 WSLg 显示窗口)
+make run        # 构建并启动 QEMU(i386,需要 WSLg 显示窗口)
 make shot       # 无头模式:不弹窗,跑完生成 shot.ppm 截图
 make apps       # 只重编用户程序(hello/closeall)
 make help       # 列出全部目标
 ```
+
+### x86-64 / EFI(实验性)
+
+```bash
+sudo apt install grub-efi-amd64-bin mtools ovmf   # 一次性依赖
+make x64        # 构建 YuanCore64.iso(BIOS+EFI 双启动)
+make run64      # QEMU x86-64,BIOS 路径启动
+make run-efi    # QEMU x86-64 + OVMF,UEFI 启动
+```
+
+x64 版与 i386 版共用同一套桌面/shell/文件系统代码;ring3 程序执行
+在 x64 下不可用(见"实验性选项")。依赖缺失时 `make x64` 会明确报错。
 
 `make run` 窗口不出来时，先 `wsl --shutdown`(Windows PowerShell)再试；
 仍不行用 `make shot` 验证内核本身，或 `-vnc :1` + VNC 客户端。
