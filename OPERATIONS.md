@@ -8,23 +8,18 @@
 
 ```bash
 cd ~/myos
-make run        # 构建并启动 QEMU(i386,需要 WSLg 显示窗口)
+sudo apt install grub-efi-amd64-bin mtools ovmf   # 一次性依赖
+make x64        # 主线:构建 YuanCore64.iso(BIOS+EFI 双启动)
+make run64      # QEMU x86-64,BIOS 路径启动(需要 WSLg 显示窗口)
+make run-efi    # QEMU x86-64 + OVMF,UEFI 启动
 make shot       # 无头模式:不弹窗,跑完生成 shot.ppm 截图
-make apps       # 只重编用户程序(hello/closeall)
+make apps       # 只重编用户程序 ELF(x64 旗标)
+make yapps      # 重打 YCP1 应用包(内嵌 blob)
 make help       # 列出全部目标
 ```
 
-### x86-64 / EFI(实验性)
-
-```bash
-sudo apt install grub-efi-amd64-bin mtools ovmf   # 一次性依赖
-make x64        # 构建 YuanCore64.iso(BIOS+EFI 双启动)
-make run64      # QEMU x86-64,BIOS 路径启动
-make run-efi    # QEMU x86-64 + OVMF,UEFI 启动
-```
-
-x64 版与 i386 版共用同一套桌面/shell/文件系统代码;ring3 程序执行
-在 x64 下不可用(见"实验性选项")。依赖缺失时 `make x64` 会明确报错。
+i386 旧目标 `make run` 仍可用，仅作对照。依赖缺失时 `make x64` 会明确报错。
+x64 版 ring3 程序执行默认开启（见"实验性选项"的 exec）。
 
 `make run` 窗口不出来时，先 `wsl --shutdown`(Windows PowerShell)再试；
 仍不行用 `make shot` 验证内核本身，或 `-vnc :1` + VNC 客户端。
@@ -33,10 +28,14 @@ x64 版与 i386 版共用同一套桌面/shell/文件系统代码;ring3 程序�
 
 | 元素 | 说明 |
 |---|---|
-| 左侧图标 | Files / Terminal / Settings / About，单击打开 |
+| 桌面画布 | 4×4 共 16 屏的虚拟桌面；每屏左下角有屏号，窗口可跨屏摆放 |
+| 任务栏 | 右缘竖条(默认显示)：头像(点击=设置)/Start/启动图标/运行程序栏/时钟。Win 键或点右缘 4px 提示条**唤起/收起** |
+| Start 按钮 | 打开开始菜单 |
+| 启动图标 | 任务栏 Start 之下：Files / Terminal / Settings / About，单击打开(v0.7 起桌面不放图标) |
+| 雷达图 | 右下角 minimap：显示 16 屏与当前视口位置，点中即跳屏 |
 | 终端窗口 | YuanCore Shell，右上角 × 可**关闭**；Terminal 图标或菜单重开，历史输出不丢 |
-| 右缘竖条 | **任务栏**(默认显示)。Win 键或点右缘 4px 提示条**唤起/收起** |
-| Start 按钮 | 任务栏顶部，打开开始菜单 |
+
+**画布导航**：方向键按屏移动视口 / 空白画布按住拖动平移 / 点雷达图跳屏。
 
 **开始菜单**：顶部即搜索框，直接打字即检索应用(如输 `he` 过滤出 hello)；
 ↑↓ 或 Tab 选择，Enter 启动；Esc 关闭。下方固定入口:
@@ -56,7 +55,7 @@ Files / Terminal / Settings / About / Reboot / Close。
 | 键 | 作用 |
 |---|---|
 | **Win** | 唤起/收起任务栏 |
-| ↑/↓ | shell:翻命令历史；窗口:移动焦点 |
+| ↑/↓/←/→ | shell:翻命令历史(↑/↓)；窗口:移动焦点；无窗口时:画布按屏平移 |
 | Tab | shell:命令补全；窗口:下一焦点 |
 | Home/End | 行首/行尾 |
 | Ctrl+C / Ctrl+U | 放弃当前行 / 清空当前行 |
@@ -69,21 +68,23 @@ Files / Terminal / Settings / About / Reboot / Close。
 help                  命令列表          clear     清屏
 about                 内核信息          mem       内存/堆统计
 uptime / ticks        开机时长/tick      date      RTC 实时时间
-echo <文本>            原样输出           reboot    重启
-apps                  已安装应用列表
+reboot                重启              apps      已安装应用列表
 ls [目录]  cat <文件>  write <文件> <文本>
 mkdir <目录>  rm <路径>  df
 mouse                 鼠标事件实时监视(Esc 退出)
-run <程序>            启动程序(如 run hello,自动补 /apps/ 前缀)
+run <程序>            启动程序(x64 默认开启)
+ycp install|list|remove   YCP1 应用包安装/列表/卸载
+netinfo               网卡/MAC/IP 信息
+ntpsync               NTP 对时(QEMU user-net)
 settings              UI 设置(见下)
 ```
 
 ## 6. 个性化设置
 
 ```
-settings                        列出 18 个颜色项
+settings                        列出 23 个颜色项
 settings set <key> <RRGGBB>     改单项(如 settings set accent FF0000)
-settings preset <name>          换主题(default/ocean/sunset/matrix/light)
+settings preset <name>          换主题(default=浅色/ocean/sunset/matrix/light)
 settings wallpaper gradient|solid|dots    壁纸样式
 settings clock on|off           任务栏时钟开关
 settings ui                     图形化设置窗口(Theme / Experimental 选项卡)
@@ -98,7 +99,7 @@ settings reset                  恢复默认
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
-| `exec` | **off** | **ring3 程序执行**（`run` / 开始菜单的 hello、closeall）。存在未定位根因的稳定性问题,默认禁用；调试时打开 |
+| `exec` | **on** | **ring3 程序执行**（`run` / 开始菜单启动项）。x64 内核默认启用；遇问题可临时关闭排障 |
 | `refresh` | off | **全局刷新 ~30fps**:整屏每秒重绘 30 次。性能开销极大,QEMU 下会明显拖慢交互,仅诊断/演示用 |
 | `drag` | on | 窗口拖动总开关(关掉后标题栏不能拖) |
 | `snap` | off | 拖动时窗口距屏缘 16px 内自动吸齐 |
@@ -109,31 +110,28 @@ settings reset                  恢复默认
 
 实验性选项**只存内存**，重启回默认——稳定后才会并入正式设置并持久化。
 
-> **关于程序执行**:点击开始菜单的 hello/closeall 当前会提示
-> "disabled for stability" 而不是崩溃。启用后如遇内核崩溃(红屏),
-> 请拍照并把 panic 页信息反馈给开发流程。
-
 ## 7. 文件与程序
 
-- `ls` / Files 图标浏览 ramfs；`cat` / Files 里 Enter 查看文本文件。
-- `write /notes.txt hello world` 建文件；`rm` 删除；`mkdir` 建目录。
-- 应用在 `/apps/*.app`(ELF32)。内置:hello、closeall。
-- `run hello` 或开始菜单检索启动。
-- 自己写程序:参考 `apps/ycapi.h`(程序侧 API)与 `apps/hello.c`(范例)，
-  `make apps` 编译。
-- **编译用户程序必须带 `-mno-sse -mno-sse2 -mno-mmx -msoft-float`**:
-  QEMU i386 默认 CPU 没有 SSE2,编出 SSE 指令用户态直接 #UD 崩溃
+- `ls` / Files 图标浏览 ramfs；`cat` / Files 里 Enter 查看/编辑文本文件。
+- `write /notes.txt hello world` 建文件；`rm` 删除(目录递归)；`mkdir` 建目录。
+- 应用以 **YCP1 包**(`.ycp`)分发，装在 `/apps/<名字>/`；内置 demo、smoke
+  两个包，开机自动安装。`apps` 命令列表，开始菜单检索启动。
+- 安装自己的包:`ycp install <路径>`；卸载:`ycp remove <名字>`。
+- 自己写程序:参考 `apps/ycapi.h`(程序侧 API)与 `apps/counter.c`(范例)，
+  `make apps` 编译 ELF，`make yapps` 打包。
+- **编译用户程序必须带 `-mno-red-zone -mno-sse -mno-sse2 -mno-mmx -msoft-float`**:
+  QEMU 默认 CPU 没有 SSE2，编出 SSE 指令用户态直接 #UD 崩溃
   (make apps 已内置这些标志)。
 
-## 8. 程序可用 API(int 0x80)
+## 8. 程序可用 API(int 0x80，31 项 / ABI 1.0)
 
 打印/绘图:`yc_print yc_label yc_button yc_fillrect yc_putpixel`
 输入:`yc_getkey yc_key_poll yc_mouse_poll yc_wait_event yc_cursor`
 窗口:`yc_draw_window yc_refresh yc_close_all yc_term_show`
-文件:`yc_read_file yc_write_file`
-系统:`yc_random yc_ticks yc_sleep_ticks yc_app_count yc_app_name yc_app_desc yc_exit`
+文件:`yc_read_file yc_write_file yc_dir_list yc_delete`
+系统:`yc_random yc_ticks yc_sleep_ticks yc_app_count yc_app_name yc_app_desc yc_abi yc_exit`
 
-完整清单与构建命令见 `apps/ycapi.h`。
+完整调用号表与构建命令见 `apps/ycapi.h`，契约规范见 `API_SPEC.md`。
 
 ## 9. 故障排查
 
