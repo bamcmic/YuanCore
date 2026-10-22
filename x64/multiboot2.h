@@ -19,6 +19,7 @@
 #define MB2_TAG_MEMINFO    4u      /* mem_lower/mem_upper */
 #define MB2_TAG_MMAP       6u      /* memory map */
 #define MB2_TAG_FRAMEBUFFER 8u
+#define MB2_TAG_MODULES    3u      /* boot modules */
 
 /* multiboot2 mmap 条目布局(base/length/type) */
 struct mb2_mmap_entry {
@@ -30,7 +31,8 @@ struct mb2_mmap_entry {
 
 /* multiboot1 mmap 条目(合成目标格式,pmm.c 按它遍历):
  *   uint32 size; uint64 base; uint64 length; uint32 type;  */
-#define MB1_MMAP_ENTRY_SIZE 24u
+#define MB1_MMAP_ENTRY_SIZE 24u     /* 条目总长 */
+#define MB1_MMAP_SIZE_FIELD 20u     /* size 字段值:不含自身 4 字节 */
 
 #define MB1_MMAP_TYPE_AVAILABLE 1u
 

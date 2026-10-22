@@ -85,6 +85,35 @@ void fb_putpixel(int x, int y, unsigned int color)
     }
 }
 
+unsigned int fb_getpixel(int x, int y)
+{
+    volatile unsigned char *p;
+    unsigned int off;
+
+    if (!fb.ready || x < 0 || y < 0)
+        return 0;
+    if ((unsigned int)x >= fb.width || (unsigned int)y >= fb.height)
+        return 0;
+
+    off = (unsigned int)y * fb.pitch + (unsigned int)x * (fb.bpp / 8);
+    p = fb.addr + off;
+
+    if (fb.bpp == 32)
+        return *(volatile unsigned int *)p;
+    if (fb.bpp == 24)
+        return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+               ((unsigned int)p[2] << 16);
+    if (fb.bpp == 16) {
+        unsigned short c = *(volatile unsigned short *)p;
+
+        /* RGB565 -> 0x00RRGGBB 近似展开 */
+        return (((c >> 11) & 0x1F) * 255 / 31 << 16) |
+               (((c >> 5) & 0x3F) * 255 / 63 << 8) |
+               ((c & 0x1F) * 255 / 31);
+    }
+    return 0;
+}
+
 void fb_hline(int x, int y, int w, unsigned int color)
 {
     int i;

@@ -11,7 +11,7 @@
 /* 链接脚本导出的内核结束地址 */
 extern unsigned char kernel_end;
 
-#define MEM_CAP_MB 512U                      /* 位图上限，够用且省内存 */
+#define MEM_CAP_MB 16384U                    /* 位图上限 16GB；位图按实际内存自适应 */
 #define MB (1024U * 1024U)
 
 static unsigned char *bitmap;
@@ -155,7 +155,7 @@ void pmm_init(const struct multiboot_info *mbi)
         first_free++;
 }
 
-unsigned int pmm_alloc_frame(void)
+unsigned long long pmm_alloc_frame(void)
 {
     unsigned int i;
 
@@ -164,15 +164,15 @@ unsigned int pmm_alloc_frame(void)
             bitmap_set(i);
             free_count--;
             first_free = i + 1;
-            return i * PMM_FRAME;
+            return (unsigned long long)i * PMM_FRAME;
         }
     }
     return 0;
 }
 
-void pmm_free_frame(unsigned int addr)
+void pmm_free_frame(unsigned long long addr)
 {
-    unsigned int i = addr / PMM_FRAME;
+    unsigned int i = (unsigned int)(addr / PMM_FRAME);
 
     if (addr == 0 || i >= nframes || !bitmap_test(i))
         return;

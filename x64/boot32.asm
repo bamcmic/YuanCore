@@ -36,7 +36,10 @@ mb2_start:
 
     ; 信息请求:告诉 GRUB 我们需要 framebuffer / memory map / basic meminfo
     ; (编号为引导信息 tag 类型:framebuffer=8, mmap=6, meminfo=4;
-    ;  size 必须含 type+size 自身 = 2+2+4*3 = 16,GRUB 严格校验)
+    ;  size = 2+2+4*3 = 16,GRUB 严格校验。
+    ;  注: 尝试加请求 modules(3) 会使 GRUB 拒绝引导(size 只认 16),
+    ;  且 GRUB 的 multiboot2 也不支持 module 传包 —— .ycp 分发走
+    ;  内核内嵌 blob(见 kernel.c) 与 ycp 命令, 不走 boot module。)
     align 8
     dw 1                        ; type = information request
     dw 16
@@ -44,12 +47,16 @@ mb2_start:
     dd 6                        ; memory map
     dd 4                        ; basic meminfo
 
-    ; 帧缓冲请求:1024x768x32 线性帧缓冲(size = 2+2+4*3 = 16)
+    ; 帧缓冲请求:1920x1080x32 线性帧缓冲(size = 2+2+4*3 = 16)
+    ; 真机 VBE/GOP 有 1080p 模式,GRUB 会直接命中;QEMU std VGA 的
+    ; VBE 模式表没有 1080p,GRUB 自动回退到 1280x800(实测)。
+    ; 注意:grub.cfg 里绝不要 insmod all_video —— 会让 GRUB 的模式
+    ; 协商产出畸形分辨率(1024x768x32 → 768x32,实测黑屏)。
     align 8
     dw 5                        ; type = framebuffer
     dw 16
-    dd 1024
-    dd 768
+    dd 1920
+    dd 1080
     dd 32
 
     ; 结束 tag(size 固定为 8)

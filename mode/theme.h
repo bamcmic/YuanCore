@@ -26,6 +26,11 @@ enum theme_color {
     THEME_ICON_TERMINAL,
     THEME_ICON_SETTINGS,
     THEME_ICON_ABOUT,
+    THEME_SHADOW,          /* 窗口/图标投影阴影(黑) */
+    THEME_ICON_ART,        /* 桌面图标线稿(白) */
+    THEME_ICON_LABEL,      /* 图标标签文字 */
+    THEME_CURSOR_HALO,     /* 光标白晕 */
+    THEME_CURSOR_BODY,     /* 光标本体 */
     THEME_COLOR_COUNT
 };
 

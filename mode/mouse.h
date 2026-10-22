@@ -8,4 +8,25 @@ void mouse_init(void);
  * 没有返回 0。 */
 int mouse_poll(int *dx, int *dy, int *btn);
 
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
+/* 取走并清零滚轮增量(正=上滚)。非滚轮鼠标恒返回 0 */
+int mouse_wheel(void);
+
 #endif /* MOUSE_H */

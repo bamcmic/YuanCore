@@ -241,6 +241,8 @@ extern void cmd_settings_init(void);
 extern void cmd_fs_init(void);
 extern void cmd_mouse_init(void);
 extern void cmd_exec_init(void);
+extern void cmd_net_init(void);
+extern void cmd_ycp_init(void);
 
 /* ---- 字符串工具 ---- */
 
@@ -522,13 +524,20 @@ void shell_redraw_ui(void)
     ui_refresh();
 }
 
-/* ---- 桌面点击启动（ui.c 的图标/Start 回调） ---- */
+/* ---- 任务栏启动（ui.c 的启动图标/Start 回调） ---- */
 
 /* 桌面小程序（app_desktop.c） */
 extern void app_files_open(void);
 extern void app_about_open(void);
 extern void app_startmenu_open(void);
 extern void app_settings_open(void);
+#include "users.h"
+extern int app_login_open(void);
+extern void app_login_autostart(void);
+extern int firstboot_blocking(void);
+extern void firstboot_key(int key);
+extern void firstboot_repaint(void);
+extern void firstboot_mouse(int dx, int dy, int btn);
 
 void shell_desktop_launch(int id)
 {
@@ -596,6 +605,8 @@ void shell_init(void)
     cmd_fs_init();
     cmd_mouse_init();
     cmd_exec_init();
+    cmd_net_init();            /* netinfo / ntpsync */
+    cmd_ycp_init();            /* ycp install / list / remove */
 
     /* 应用注册表：开始菜单检索 / apps 命令 / int 0x80 查询共用 */
     registry_set_launcher(exec_run);
@@ -607,11 +618,40 @@ void shell_init(void)
     prompt();
     ui_mouse_init();              /* 光标初始位置居中 */
     ui_set_launch(shell_desktop_launch);
+    desktop_set_running_provider(ui_running_list);  /* 程序栏+雷达图窗口点 */
+
+    users_init();                 /* /users 目录(用户注册环节) */
+    app_login_autostart();        /* 有账户且未登录 -> 弹登录窗 */
 }
 
 void shell_run(void)
 {
     for (;;) {
+        /* 首启全屏注册: 零账户时接管全部输入与渲染,注册前绕不过 */
+        if (firstboot_blocking()) {
+            static unsigned int last_frame;
+            unsigned int rate = ui_exp_rate60_on() ? 60u : 30u;
+            unsigned int frame = timer_ticks() * rate / 100u;
+            int k = kbd_poll();
+            int md, md2, mb;
+
+            while (mouse_poll(&md, &md2, &mb))
+                firstboot_mouse(md, md2, mb);   /* 点输入框/按钮 */
+            if (k >= 0)
+                firstboot_key(k);
+            if (frame != last_frame) {      /* 全刷 ~30fps */
+                last_frame = frame;
+                firstboot_repaint();
+            }
+            if (k < 0)
+                hlt();                      /* timer 中断 100Hz 唤醒 */
+            continue;
+        }
+
+        /* 登录守卫: 有账户且未登录时,登录窗被 Esc 关掉立即重开 */
+        if (users_count() > 0 && users_current() == 0)
+            app_login_open();
+
         int c = kbd_poll();
         int dx, dy, btn;
 
@@ -619,12 +659,15 @@ void shell_run(void)
         while (mouse_poll(&dx, &dy, &btn))
             ui_mouse(dx, dy, btn);
 
+        ui_anim_tick();             /* 窗口入场滑动 / 滚动缓动 */
+
         /* 实验性:全局刷新 ~30fps(exp refresh)。PIT 100Hz,
          * 帧号 = tick*30/100,帧号变化即重绘整屏。空闲时靠 timer 中断
          * 唤醒 hlt,不影响功耗模型。 */
         if (ui_exp_refresh_on()) {
             static unsigned int last_frame;
-            unsigned int frame = timer_ticks() * 30u / 100u;
+            unsigned int rate = ui_exp_rate60_on() ? 60u : 30u;
+            unsigned int frame = timer_ticks() * rate / 100u;
 
             if (frame != last_frame) {
                 last_frame = frame;
@@ -653,6 +696,23 @@ void shell_run(void)
         /* 有 UI 窗口时进入模态，按键交给窗口 */
         if (ui_active()) {
             ui_key(c);
+            continue;
+        }
+
+        /* 画布导航(UI 大更新): 无模态窗口且输入行为空时,方向键逐屏移动
+         * 视口。行非空时方向键仍归终端(行编辑/历史)。
+         * 待确认: 终端聚焦时的画布导航键方案(现策略=空行优先导航)。 */
+        if ((c == KEY_LEFT || c == KEY_RIGHT
+             || c == KEY_UP || c == KEY_DOWN)
+            && line_len == 0 && cursor_pos == 0) {
+            int dcol = 0, drow = 0;
+
+            if (c == KEY_LEFT)  dcol = -1;
+            if (c == KEY_RIGHT) dcol = 1;
+            if (c == KEY_UP)    drow = -1;
+            if (c == KEY_DOWN)  drow = 1;
+            desktop_canvas_move(dcol, drow);
+            ui_refresh();
             continue;
         }
 

@@ -1,11 +1,13 @@
-/* shell/app_settings.c - 图形化设置程序(双选项卡)
+/* shell/app_settings.c - 图形化设置(侧边选项卡: Theme / Experimental)
  *
- *   [Theme]         主题预置(5 套,Enter 应用)
- *   [Experimental]  全部实验性选项开关(表在 shell/exp.c,与
- *                   settings exp 命令共用一份数据)
+ * 布局: 左侧 ui_tabs_side 垂直选项卡条 + 右侧内容区。
+ *   [Theme]        主题预置(5 套, Enter 应用)
+ *   [Experimental] 实验项(exp.c 表)
  *
- * 这是用 ui.h 写"程序"的完整范例:一个窗口 + 选项卡 + 按钮列,
- * 方向键/Tab 移动焦点,Enter 应用,Esc 关闭。按住标题栏可拖动。
+ * 变更记录:
+ *   - 调色页(Personalize: 23 个主题变量 R/G/B 通道步进)实测无法正常工作,
+ *     已整体移除;主题只保留预置切换(稳定路径)。theme_set/theme_save
+ *     等底层接口保留供命令行/os 内部使用。
  */
 #include "ui.h"
 
@@ -16,13 +18,17 @@
 #include "../mode/font.h"
 
 #define PRESET_COUNT 5
-#define BTN_H        30
-#define BTN_GAP      10
-#define TAB_H        26
-#define EXP_ROWS     5           /* 与 exp.c 表项数一致(绘制按 exp_count) */
+#define BTN_H        28
+#define LINE_H       30
+#define TAB_W        110
+#define TAB_H        40
 
 static const char *preset_names[PRESET_COUNT] = {
     "default", "ocean", "sunset", "matrix", "light"
+};
+
+static const char *const tab_names[2] = {
+    "Theme", "Experimental"
 };
 
 static int win_id = -1;
@@ -33,83 +39,90 @@ static void apply_preset(int idx)
     if (idx < 0 || idx >= PRESET_COUNT)
         return;
     theme_preset(preset_names[idx]);
-    ui_refresh();               /* 全部窗口 + 桌面 + 终端一起换肤 */
+    ui_refresh();
 }
 
-static void draw_tabs(int x, int y, int cw)
+static void draw_tabs(int x, int y)
 {
-    int half = (cw - 8) / 2;
+    ui_tabs_side(x, y, TAB_W, TAB_H, tab_names, 2, page, 0);
+}
 
-    /* 当前页的 tab 用高亮色,非当前页用窗口底色 */
-    ui_draw_button(x, y, half, TAB_H, "Theme", page == 0);
-    ui_draw_button(x + half + 8, y, cw - half - 8, TAB_H,
-                   "Experimental", page == 1);
+static void page_theme(int x, int y, int cw)
+{
+    int i;
 
-    /* tab 也登记进焦点空间(登记顺序必须与 focus idx 一致) */
-    ui_note_button(x, y, half, TAB_H, 0);
-    ui_note_button(x + half + 8, y, cw - half - 8, TAB_H, 1);
+    ui_label(x, y, "Pick a theme preset (Enter to apply):");
+    y += 24;
+    for (i = 0; i < PRESET_COUNT; i++) {
+        int by = y + i * LINE_H;
+
+        ui_button(x, by, cw - 90, BTN_H, preset_names[i], 3 + i);
+        ui_panel(x + cw - 76, by + 4,  20, BTN_H - 8,
+                 theme_get(THEME_TITLEBAR));
+        ui_panel(x + cw - 52, by + 4,  20, BTN_H - 8,
+                 theme_get(THEME_ACCENT));
+        ui_panel(x + cw - 28, by + 4,  20, BTN_H - 8,
+                 theme_get(THEME_CONSOLE_BG));
+    }
+    ui_button(x, y + PRESET_COUNT * LINE_H + 8, cw - 90, BTN_H,
+              "Close", 3 + PRESET_COUNT);
+}
+
+static void page_exp(int x, int y, int cw)
+{
+    int i, n = exp_count();
+
+    ui_label(x, y, "Experimental toggles (runtime only):");
+    y += 24;
+    for (i = 0; i < n; i++) {
+        const struct exp_option *o = exp_get(i);
+        char line[64];
+        int p = 0;
+
+        while (o->name[p] != 0) { line[p] = o->name[p]; p++; }
+        while (p < 10) { line[p] = ' '; p++; }
+        line[p++] = '[';
+        line[p++] = o->get() ? 'x' : ' ';
+        line[p++] = ']';
+        line[p] = '\0';
+
+        ui_button(x, y + i * LINE_H, cw - 90, BTN_H, line, 3 + i);
+    }
+    ui_button(x, y + n * LINE_H + 8, cw - 90, BTN_H, "Close", 3 + n);
 }
 
 static void on_draw(int w)
 {
-    int x, y, cw, ch, i;
-    int items;                          /* 当前页的条目数 */
+    int x, y, cw, ch;
 
-    ui_client(w, &x, &y, &cw, &ch);
+    ui_win_begin(w);
+    ui_client_size(w, &cw, &ch);
+    (void)ch;
 
-    items = (page == 0) ? PRESET_COUNT : exp_count();
-    ui_focus_count(2 + items + 1);      /* 2 tab + 页内条目 + Close */
+    draw_tabs(8, 8);
 
-    draw_tabs(x, y, cw);
-    y += TAB_H + 10;
+    /* 内容区 */
+    x = TAB_W + 22;
+    y = 8;
+    cw -= TAB_W + 40;
 
-    if (page == 0) {
-        ui_label(x, y, "Pick a theme preset (Enter to apply):");
-        y += 24;
+    if (page == 0)
+        page_theme(x, y, cw);
+    else
+        page_exp(x, y, cw);
+}
 
-        for (i = 0; i < PRESET_COUNT; i++) {
-            int by = y + i * (BTN_H + BTN_GAP);
-
-            ui_button(x, by, cw - 90, BTN_H, preset_names[i], 2 + i);
-
-            /* 右侧画当前主题的三个代表色 */
-            ui_panel(x + cw - 76, by + 5,  20, BTN_H - 10,
-                     theme_get(THEME_TITLEBAR));
-            ui_panel(x + cw - 52, by + 5,  20, BTN_H - 10,
-                     theme_get(THEME_ACCENT));
-            ui_panel(x + cw - 28, by + 5,  20, BTN_H - 10,
-                     theme_get(THEME_CONSOLE_BG));
-        }
-        y += PRESET_COUNT * (BTN_H + BTN_GAP);
-    } else {
-        ui_label(x, y, "Experimental toggles (runtime only):");
-        y += 24;
-
-        for (i = 0; i < exp_count(); i++) {
-            const struct exp_option *o = exp_get(i);
-            char line[40];
-            int n = 0;
-
-            while (o->name[n] != 0) { line[n] = o->name[n]; n++; }
-            while (n < 10) { line[n] = ' '; n++; }
-            line[n++] = '[';
-            line[n++] = o->get() ? 'x' : ' ';
-            line[n++] = ']';
-            line[n] = '\0';
-
-            ui_button(x, y + i * (BTN_H + BTN_GAP), cw - 90, BTN_H,
-                      line, 2 + i);
-        }
-        y += exp_count() * (BTN_H + BTN_GAP);
-    }
-
-    ui_button(x, y + 6, cw - 90, BTN_H, "Close", 2 + items);
+static int page_items(int pg)
+{
+    return (pg == 0) ? PRESET_COUNT : exp_count();
 }
 
 static void on_key(int w, int key)
 {
-    int items = (page == 0) ? PRESET_COUNT : exp_count();
     int f = ui_focus();
+    int last = 3 + page_items(page);
+
+    (void)w;
 
     switch (key) {
     case KEY_UP:
@@ -122,29 +135,23 @@ static void on_key(int w, int key)
         break;
     case KEY_ENTER:
     case ' ':
-        if (f == 0) {                       /* Theme tab */
-            page = 0;
-            ui_focus_set(2);
+        if (f <= 1) {                  /* 选项卡 */
+            page = f;
+            ui_focus_set(3);
             ui_refresh();
             return;
         }
-        if (f == 1) {                       /* Experimental tab */
-            page = 1;
-            ui_focus_set(2);
-            ui_refresh();
+        if (f == last) {               /* Close */
+            ui_close(win_id);
             return;
         }
-        if (f == 2 + items) {               /* Close */
-            ui_close(w);
-            return;
-        }
-        if (page == 0)
-            apply_preset(f - 2);
-        else {
-            const struct exp_option *o = exp_get(f - 2);
+        if (page == 0) {
+            apply_preset(f - 3);
+        } else {
+            const struct exp_option *o = exp_get(f - 3);
 
             if (o != 0) {
-                o->set(o->get() ? 0 : 1);   /* 切换开关 */
+                o->set(o->get() ? 0 : 1);
                 ui_refresh();
             }
         }
@@ -157,12 +164,10 @@ static void on_key(int w, int key)
 void app_settings_open(void)
 {
     if (ui_valid(win_id)) {
-        ui_refresh();               /* 已经开着就重绘一遍 */
+        ui_refresh();
         return;
     }
     page = 0;
-    win_id = ui_open(300, 100, 360,
-                     36 + 14 + TAB_H + 10 + 24
-                     + EXP_ROWS * (BTN_H + BTN_GAP) + BTN_H + 30 + 14,
+    win_id = ui_open(220, 60, 540, 480,
                      "Settings", on_draw, on_key);
 }

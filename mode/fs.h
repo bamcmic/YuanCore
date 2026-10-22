@@ -14,6 +14,7 @@
 #define FS_NOSPACE -4      /* 条目或文件大小超限 */
 #define FS_NOTEMPTY -5
 #define FS_ISDIR   -6
+#define FS_FORMAT  -7      /* 数据格式损坏(压缩容器等) */
 
 #define FS_NAME_MAX 30
 #define FS_MAX_FILE 262144     /* 单文件上限 256KB（要装得下可执行程序） */
@@ -36,11 +37,18 @@ int  fs_append(const char *path, const void *data, int len);
 int  fs_read(const char *path, void *buf, int max);
 
 int  fs_delete(const char *path);    /* 目录必须为空 */
+int  fs_rmtree(const char *path);    /* 递归删除文件/目录树 */
 
 /* 遍历目录：idx 从 0 递增，没有下一项时返回 0 */
 const char *fs_list(const char *dir, int idx, int *is_dir, int *size);
 
 /* 统计 */
 void fs_stats(int *used_entries, int *total_entries, int *bytes_used);
+
+/* ---- 持久化(ATA PIO 镜像;无盘时全部 no-op) ----
+ * 0=已加载镜像 1=空盘/首次(可用,首次写建镜像) -1=无盘 */
+int fs_persist_init(void);
+int fs_persist_enabled(void);
+int fs_sync(void);               /* 全量写回;0 成功 */
 
 #endif /* FS_H */

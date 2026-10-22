@@ -8,7 +8,11 @@ typedef void (*irq64_handler_t)(void *frame);   /* frame = struct irq_frame64 * 
 
 void idt64_init(void);
 void idt64_set_gate(int n, uint64_t handler);   /* ring0 中断门 */
+void idt64_set_gate_dpl(int n, uint64_t handler, int dpl);
 void irq64_register(int vector, irq64_handler_t h);   /* 0-255 */
+
+/* int 0x80 系统调用门:登记 isr64_int80 桩(DPL3)并绑定 handler */
+void syscall64_register_gate(irq64_handler_t h);
 
 /* 中断/IRQ 分发(isr64.asm 桩调用) */
 void x64_irq_dispatch(void *frame);

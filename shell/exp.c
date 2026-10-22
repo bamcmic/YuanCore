@@ -13,6 +13,20 @@
 
 #include "../mode/exec.h"
 #include "../mode/desktop.h"
+#include "../mode/vbe.h"
+#include "../mode/fb.h"
+
+/* res1024: 分辨率实验项(off=1280x800 默认, on=1024x768 小屏快刷档) */
+static int res1024_on(void)
+{
+    return fb.width == 1024;
+}
+
+static void res1024_set(int on)
+{
+    if (vbe_set_mode(on ? 1024 : 1280, on ? 768 : 800) == 0)
+        ui_refresh();
+}
 
 static const struct exp_option opts[] = {
     { "exec",    "ring3 program execution",   exec_enabled_get,       exec_set_enabled     },
@@ -20,6 +34,8 @@ static const struct exp_option opts[] = {
     { "drag",    "window dragging",           ui_exp_drag_on,         ui_exp_drag          },
     { "snap",    "snap window to screen edge", ui_exp_snap_on,        ui_exp_snap          },
     { "seconds", "clock seconds row",         desktop_exp_seconds_on, desktop_exp_seconds  },
+    { "hi60",    "global redraw 60fps (with refresh)", ui_exp_rate60_on, ui_exp_rate60 },
+    { "res1024", "1024x768 mode (QEMU std VGA)", res1024_on, res1024_set },
 };
 
 #define EXP_N (int)(sizeof(opts) / sizeof(opts[0]))

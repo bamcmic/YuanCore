@@ -1,9 +1,16 @@
-/* x64/gdt64.c - x86-64 GDT
+/* x64/gdt64.c - x86-64 GDT（含 ring3 段与 TSS64）
  *
- * 长模式的段描述符只剩 code/data 两类,base/limit 语义基本作废,
- * 只需 null + 内核 code + 内核 data。
- * 无 ring3(TSS)之前不需要 TSS 描述符;
- * 中断栈金丝雀沿用 i386 版的巡检思路。
+ * 长模式段布局:
+ *   0x00 null
+ *   0x08 kernel code (L=1)
+ *   0x10 kernel data
+ *   0x18 user code ring3 (L=1)      <- ring3 迁移新增
+ *   0x20 user data ring3            <- ring3 迁移新增
+ *   0x28 TSS64(16 字节描述符,占两个 8 字节槽位)
+ *
+ * TSS 在长模式只有三件事有用:rsp0/ist/iopb —— 我们只用 rsp0:
+ * ring3 -> ring0(int 0x80 / IRQ) 时 CPU 从 TSS.rsp0 取内核栈。
+ * 无任务切换语义,ltr 指一下即可。
  */
 #include "gdt64.h"
 
@@ -18,16 +25,41 @@ struct gdt_entry64 {
     uint8_t  base_hi;
 } __attribute__((packed));
 
+/* TSS 描述符是 16 字节系统段,跨 GDT[5] 与 GDT[6] 两个槽位 */
+struct tss_desc64 {
+    uint16_t limit_lo;
+    uint16_t base_lo;
+    uint8_t  base_mid;
+    uint8_t  access;            /* 0x89 = present | TSS64(available) */
+    uint8_t  granularity;
+    uint8_t  base_hi;
+    uint32_t base_top;
+    uint32_t zero;
+} __attribute__((packed));
+
 /* 64 位模式 lgdt 读 m16:64:limit 在 +0,base 必须紧跟在 +2(不能有 pad) */
 struct gdt_ptr64 {
     uint16_t limit;
     uint64_t base;
 } __attribute__((packed));
 
-static struct gdt_entry64 gdt[3];
-static struct gdt_ptr64   gp;
+/* TSS64:长模式硬件只消费 rsp0/ist/iopb,其余历史包袱全置 0 */
+struct tss64 {
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist[7];
+    uint64_t reserved2;
+    uint16_t iopb;              /* 指向 I/O 位图,无位图时 = sizeof(tss64) */
+} __attribute__((packed));
 
-/* 中断备用栈(未来 ring3/嵌套中断用),底部埋金丝雀 */
+static struct gdt_entry64 gdt[7];   /* 5 个 8 字节段 + TSS 占 5,6 两槽 */
+static struct gdt_ptr64   gp;
+static struct tss64       tss __attribute__((aligned(8)));
+
+/* 中断备用栈(rsp0 指向其顶部),底部埋金丝雀 */
 static unsigned char irq_stack64[32768] __attribute__((aligned(16)));
 #define CANARY 0xC0DEFEEDC0DEFEEDULL
 
@@ -72,11 +104,36 @@ void gdt64_init(void)
     canary[0] = CANARY;         /* 栈底金丝雀 */
 
     gdt64_set(0, 0x00, 0x00);   /* null */
-    gdt64_set(1, 0x9A, 0x20);   /* 64-bit code: P|S|EXE, L=1 */
-    gdt64_set(2, 0x92, 0x00);   /* 64-bit data: P|S|W */
+    gdt64_set(1, 0x9A, 0x20);   /* 64-bit kernel code: P|S|EXE, L=1 */
+    gdt64_set(2, 0x92, 0x00);   /* 64-bit kernel data: P|S|W */
+    gdt64_set(3, 0xFA, 0x20);   /* 64-bit user code ring3: P|DPL3|S|EXE, L=1 */
+    gdt64_set(4, 0xF2, 0x00);   /* 64-bit user data ring3: P|DPL3|S|W */
 
     gp.limit = (uint16_t)(sizeof(gdt) - 1);
     gp.base  = (uint64_t)(unsigned long)gdt;
 
     gdt64_flush();
+}
+
+void tss64_init(void)
+{
+    struct tss_desc64 *desc = (struct tss_desc64 *)&gdt[5];
+    uint64_t base = (uint64_t)(unsigned long)&tss;
+    uint64_t top  = (uint64_t)(unsigned long)(irq_stack64
+                    + sizeof(irq_stack64));
+
+    /* 静态存储默认全零,只填硬件消费的字段 */
+    tss.rsp0 = top & ~(uint64_t)0xFu;   /* 16 字节对齐的栈顶 */
+    tss.iopb = (uint16_t)sizeof(tss);
+
+    desc->limit_lo     = (uint16_t)(sizeof(tss) - 1);
+    desc->base_lo      = (uint16_t)(base & 0xFFFFu);
+    desc->base_mid     = (uint8_t)((base >> 16) & 0xFFu);
+    desc->access       = 0x89;          /* present | TSS64 available */
+    desc->granularity  = 0x00;
+    desc->base_hi      = (uint8_t)((base >> 24) & 0xFFu);
+    desc->base_top     = (uint32_t)(base >> 32);
+    desc->zero         = 0;
+
+    __asm__ volatile ("ltr %0" : : "rm"((uint16_t)0x28) : "memory");
 }

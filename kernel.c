@@ -10,7 +10,15 @@
 #include "mode/multiboot.h"
 #include "mode/fb.h"
 #include "mode/font.h"
+#include "mode/splash.h"
 #include "mode/theme.h"
+#include "mode/ycp.h"
+#include "mode/vbe.h"
+#include "mode/ata.h"
+#include "mode/fs.h"
+#include "mode/exec.h"
+#include "mode/demo_ycp_blob.h"
+#include "mode/smoke_ycp_blob.h"
 #include "mode/desktop.h"
 #include "mode/gdt.h"
 #include "mode/idt.h"
@@ -30,6 +38,7 @@
 #include "mode/app_hello_blob.h"
 #include "mode/app_closeall_blob.h"
 #include "shell/console.h"
+#include "net/net.h"
 #include "shell/shell.h"
 
 #define MULTIBOOT_MAGIC 0x2BADB002
@@ -223,6 +232,7 @@ void kernel_main_common(const struct multiboot_info *mbi)
     int rc;
 #if defined(YC_X64)
     extern void gdt64_init(void);
+    extern void tss64_init(void);
     extern void idt64_init(void);
     extern void paging64_set_ro(unsigned long long start,
                                 unsigned long long len);
@@ -235,10 +245,15 @@ void kernel_main_common(const struct multiboot_info *mbi)
 
 #if defined(YC_X64)
     gdt64_init();
+    tss64_init();                      /* rsp0=中断栈顶+ltr,
+                                        * ring3 经 int 0x80/IRQ 进内核
+                                        * 时切栈用 */
     ser_puts64(" G");
     idt64_init();
     ser_puts64(" I");
-    paging64_set_ro(idt64_page_base(), 4096);  /* IDT 只读陷阱 */
+    /* IDT 只读陷阱不能在这里上 —— syscall_init() 还要登记 int 0x80 门,
+     * 先锁后写 = 页错误(实机踩过:cr2=0x189800 即 idt[0x80],err=3)。
+     * 上锁时机移到 syscall_init() 之后(x64 分支)。 */
     pic64_init();
     ser_puts64(" C");
 #else
@@ -253,6 +268,8 @@ void kernel_main_common(const struct multiboot_info *mbi)
     pmm_init(mbi);
     heap_init();
     fs_init();                             /* 需要 kmalloc，必须在 heap_init 之后 */
+    ata_init();                            /* 探测主盘(无盘不影响启动) */
+    fs_persist_init();                     /* 有有效镜像则覆盖内存树 */
 
     /* 预置示例文件与演示程序（内存文件系统，重启回初始状态） */
     fs_create_dir("/apps");
@@ -262,14 +279,32 @@ void kernel_main_common(const struct multiboot_info *mbi)
     fs_write("/docs/about.txt",
              "YuanCore - 32-bit x86 hobby kernel.\n", 37);
 #ifndef YC_X64
-    /* x86-64 版不迁移 ring3，不内置 .app(用户程序为 ELF32) */
-    fs_write("/apps/hello.app", app_hello_blob, APP_HELLO_LEN);
-    fs_write("/apps/closeall.app", app_closeall_blob, APP_CLOSEALL_LEN);
+    /* x86-64: 应用统一走 YCP 包(ycp install), 不再内置裸 .app blob */
+#endif
+
+#if defined(YC_X64)
+    /* 内置 demo 包: blob 写入 + 完整 YCP 安装链路
+     * (zip 解析 -> manifest 校验 -> 解压 -> entry 确认)。
+     * 注: GRUB 的 multiboot2 不支持 module 传包(module 命令属于
+     * multiboot1), 故采用编译期内嵌; mb2 modules 解析代码保留备用。 */
+    fs_write("/apps/demo.ycp", demo_ycp_blob, DEMO_YCP_LEN);
+    if (ycp_install("/apps/demo.ycp") == 0) {
+        ser_puts64(" Y");                     /* demo 包安装成功 */
+    } else {
+        ser_puts64(" Y-FAIL");
+    }
 #endif
 
     kbd_init();
     mouse_init();                          /* PS/2 鼠标，IRQ12 */
     timer_init(100);                       /* 100Hz，顺带验证中断链路 */
+
+    net_init();                            /* PCI 找卡 -> e1000 -> 协议栈
+                                            * (找不到网卡也只是置 not-ready,
+                                            *  不影响系统其余部分) */
+#if defined(YC_X64)
+    ser_puts64(" N");                     /* 网络子系统已初始化 */
+#endif
 
 #if defined(YC_X64)
     ser_puts64(" f");                      /* 即将初始化帧缓冲 */
@@ -293,6 +328,7 @@ void kernel_main_common(const struct multiboot_info *mbi)
             hlt();
     }
 #if defined(YC_X64)
+    splash_show();                         /* 开机 logo 动画(fb 就绪后第一帧) */
     ser_puts64(" F\r\n");                  /* 帧缓冲就绪,开始画桌面 */
     {
         extern void paging64_walk_dump(unsigned long long va);
@@ -318,6 +354,10 @@ void kernel_main_common(const struct multiboot_info *mbi)
     syscall_init();                        /* 程序用的服务表(固定地址) */
 #ifndef YC_X64
     isr_register(0x80, syscall_dispatch);  /* 系统调用门已在 IDT 里开 DPL3 */
+#else
+    /* IDT 填完(48 门 + 0x80 DPL3 门)才上只读陷阱:
+     * 此后任何运行期误写 IDT = 页错误点名肇事者。 */
+    paging64_set_ro(idt64_page_base(), 4096);  /* IDT 只读陷阱 */
 #endif
 
     console_init(SHELL_WIN_X + SHELL_PAD,
@@ -337,6 +377,10 @@ void kernel_main_common(const struct multiboot_info *mbi)
             console_puts("[err] kernel heap is not working\n");
         }
     }
+    if (net_ready())
+        console_puts("[ok ] network: e1000 online (try 'netinfo'/'ntpsync')\n");
+    else
+        console_puts("[.. ] network: no NIC present, stack disabled\n");
     console_puts("[ok ] type 'help' for commands\n\n");
 
     sti();
@@ -357,6 +401,25 @@ void kernel_main_common(const struct multiboot_info *mbi)
         else
             console_puts("[err] timer IRQ0 dead - interrupt path broken\n");
     }
+
+    /* ---- ring3 开机冒烟:x64 用户程序全链路自检 ----
+     * smoke 包(yapps 链产出)装完即跑:yc_print + yc_exit 即退。
+     * R = 即将切入 ring3;X = 完整往返(退出码 0 回到内核)。
+     * 位置在 timer 自检之后:syscall 服务表与 int 0x80 门均已就绪。 */
+#if defined(YC_X64)
+    fs_write("/apps/smoke.ycp", smoke_ycp_blob, SMOKE_YCP_LEN);
+    if (ycp_install("/apps/smoke.ycp") == 0) {
+        int rc;
+        ser_puts64(" R");
+        rc = exec_run("/apps/smoke/main/smoke.app");
+        if (rc == EXEC_OK && exec_last_status() == 0)
+            ser_puts64(" X");              /* ring3 往返成功 */
+        else
+            ser_puts64(" X-FAIL");         /* 伴生 panic 走串口 */
+    } else {
+        ser_puts64(" y-FAIL");             /* smoke 包安装失败 */
+    }
+#endif
 
     shell_init();
     shell_run();                           /* 不返回 */

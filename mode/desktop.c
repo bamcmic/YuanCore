@@ -3,10 +3,12 @@
  * 纯描点实现，不依赖任何 libc。同一份代码既跑在内核里，
  * 也跑在 Windows 侧的离线预览程序里（便于不出 QEMU 就能看效果）。
  *
- * 布局（v0.6）：
+ * 布局（v0.7）：
  *   - 任务栏 = 右侧竖条(TASKBAR_W 宽)，Win 键或点右缘提示条唤起/收起；
- *     Start 在条顶，时钟(HH/MM/SS 竖排)在条底
- *   - YuanCore Shell 终端窗口可关闭(×)，Terminal 图标/菜单重开
+ *     头像/Start/启动图标(Files/Terminal/Settings/About)在条上部，
+ *     运行中程序栏居中，时钟(HH/MM/SS 竖排)在条底
+ *   - 桌面(v0.7 起)不放图标——启动入口全部收进任务栏，画布只留给窗口
+ *   - YuanCore Shell 终端窗口可关闭(×)，Terminal 启动图标/菜单重开
  *
  * 点击命中区（desktop_icon_hit / desktop_start_hit / desktop_close_hit）
  * 与绘制用的是同一组常量 —— 改布局时两处自动一致。
@@ -17,10 +19,6 @@
 #include "theme.h"
 
 #define TITLEBAR_H  36
-#define ICON_SIZE   56
-
-/* 图标命中区比图标本体大一圈，点标签也能选中 */
-#define ICON_HIT_PAD 6
 
 static const struct multiboot_info *last_mbi;
 static desktop_clock_fn clock_provider;
@@ -28,6 +26,59 @@ static desktop_clock_fn clock_provider;
 static int taskbar_visible = 1;
 static int term_visible = 1;
 static int exp_seconds = 1;             /* 实验性：时钟秒显示 */
+static desktop_running_fn running_provider;
+
+/* 视口原点(画布像素坐标);世界层(图标/程序窗口)按它平移绘制 */
+static int vp_x, vp_y;
+
+/* ---- 虚拟画布(4x4 屏,UI 大更新) ---- */
+
+void desktop_set_running_provider(desktop_running_fn fn)
+{
+    running_provider = fn;
+}
+
+void desktop_canvas_pan(int dx, int dy)
+{
+    vp_x += dx;
+    vp_y += dy;
+    if (vp_x < 0)
+        vp_x = 0;
+    if (vp_y < 0)
+        vp_y = 0;
+    if (vp_x > (int)fb.width * CANVAS_COLS - (int)fb.width)
+        vp_x = (int)fb.width * CANVAS_COLS - (int)fb.width;
+    if (vp_y > (int)fb.height * CANVAS_ROWS - (int)fb.height)
+        vp_y = (int)fb.height * CANVAS_ROWS - (int)fb.height;
+}
+
+void desktop_canvas_goto(int col, int row)
+{
+    if (col < 0)
+        col = 0;
+    if (row < 0)
+        row = 0;
+    if (col >= CANVAS_COLS)
+        col = CANVAS_COLS - 1;
+    if (row >= CANVAS_ROWS)
+        row = CANVAS_ROWS - 1;
+    vp_x = col * (int)fb.width;
+    vp_y = row * (int)fb.height;
+}
+
+void desktop_canvas_vp(int *vx, int *vy)
+{
+    if (vx) *vx = vp_x;
+    if (vy) *vy = vp_y;
+}
+
+void desktop_canvas_move(int dcol, int drow)
+{
+    int col = vp_x / (int)fb.width + dcol;
+    int row = vp_y / (int)fb.height + drow;
+
+    desktop_canvas_goto(col, row);
+}
 
 /* shell 改主题后重绘需要 mbi 指针，这里存一份 */
 const struct multiboot_info *desktop_mbi(void)
@@ -90,7 +141,7 @@ static int bar_x(void)
 static void start_rect(int *x, int *y, int *w, int *h)
 {
     if (x) *x = bar_x() + 6;
-    if (y) *y = 6;
+    if (y) *y = 46;
     if (w) *w = TASKBAR_W - 12;
     if (h) *h = 28;
 }
@@ -106,20 +157,115 @@ static void clock_rect(int *x, int *y, int *w, int *h)
     if (h) *h = rows * 20;
 }
 
-/* ---- 点击命中 ---- */
+/* ---- 雷达图(minimap,右下角,任务栏左侧) ----
+ * 宽 = 屏宽 1/5, 高 = 屏高 1/8(1280x800 下 256x100,设计定稿)。
+ * 视口点 = 标题栏色, 窗口点 = 强调色 —— 跟随主题,
+ * default 浅色下白点会隐身,故不再硬编码。 */
 
-static const int icon_y[4] = { 60, 150, 240, 330 };
-#define ICON_X 40
+static int mm_w(void)
+{
+    return (int)fb.width / 5;
+}
+
+static int mm_h(void)
+{
+    return (int)fb.height / 8;
+}
+
+static void minimap_rect(int *x, int *y, int *w, int *h)
+{
+    if (x) *x = bar_x() - mm_w() - 8;
+    if (y) *y = (int)fb.height - mm_h() - 8;
+    if (w) *w = mm_w();
+    if (h) *h = mm_h();
+}
+
+int desktop_minimap_hit(int x, int y)
+{
+    int mx, my, mw, mh, col, row;
+
+    minimap_rect(&mx, &my, &mw, &mh);
+    if (x < mx || x >= mx + mw || y < my || y >= my + mh)
+        return 0;
+    col = (x - mx) * CANVAS_COLS / mw;
+    row = (y - my) * CANVAS_ROWS / mh;
+    desktop_canvas_goto(col, row);
+    return 1;
+}
+
+/* ---- 任务栏: 头像(条顶,点击=设置) + 运行中程序栏 ---- */
+
+static void avatar_rect(int *x, int *y, int *w, int *h)
+{
+    if (x) *x = bar_x() + 6;
+    if (y) *y = 4;
+    if (w) *w = TASKBAR_W - 12;
+    if (h) *h = 36;
+}
+
+int desktop_taskbar_avatar_hit(int x, int y)
+{
+    int ax, ay, aw, ah;
+
+    if (taskbar_visible == 0)
+        return 0;
+    avatar_rect(&ax, &ay, &aw, &ah);
+    return x >= ax && x < ax + aw && y >= ay && y < ay + ah;
+}
+
+/* ---- 启动图标(任务栏内,Start 之下;绘制与命中共用 launch_rect) ----
+ * v0.7 起桌面不放图标,Files/Terminal/Settings/About 收进任务栏,
+ * 36x36 色块 + 首字母(栏宽 48px 放不下完整标签)。 */
+
+#define LAUNCH_N     4
+#define LAUNCH_SIZE  36
+#define LAUNCH_PITCH 42                 /* 36 本体 + 6 间距 */
+
+static const char launch_letter[LAUNCH_N] = { 'F', 'T', 'S', 'A' };
+static const int launch_theme[LAUNCH_N] = {
+    THEME_ICON_FILES, THEME_ICON_TERMINAL,
+    THEME_ICON_SETTINGS, THEME_ICON_ABOUT
+};
+
+static void launch_rect(int i, int *x, int *y, int *w, int *h)
+{
+    if (x) *x = bar_x() + 6;
+    if (y) *y = 84 + i * LAUNCH_PITCH;  /* Start(46..74) 之下 */
+    if (w) *w = LAUNCH_SIZE;
+    if (h) *h = LAUNCH_SIZE;
+}
+
+#define APP_ITEM_H 30
+
+static void apps_origin(int *x, int *y)
+{
+    if (x) *x = bar_x() + 6;
+    if (y) *y = 84 + LAUNCH_N * LAUNCH_PITCH + 8;   /* 启动图标之下 */
+}
+
+int desktop_taskbar_app_hit(int x, int y)
+{
+    int ax, ay;
+
+    if (taskbar_visible == 0)
+        return -1;
+    apps_origin(&ax, &ay);
+    if (x < ax || x >= ax + TASKBAR_W - 12 || y < ay)
+        return -1;
+    return (y - ay) / APP_ITEM_H;       /* 上界由调用方按计数校验 */
+}
+
+/* ---- 点击命中 ---- */
 
 int desktop_icon_hit(int x, int y)
 {
-    int i;
+    int i, lx, ly, lw, lh;
 
-    for (i = 0; i < 4; i++) {
-        if (x >= ICON_X - ICON_HIT_PAD
-            && x < ICON_X + ICON_SIZE + ICON_HIT_PAD
-            && y >= icon_y[i] - ICON_HIT_PAD
-            && y < icon_y[i] + ICON_SIZE + 24 + ICON_HIT_PAD)
+    if (taskbar_visible == 0)
+        return -1;
+    for (i = 0; i < LAUNCH_N; i++) {
+        launch_rect(i, &lx, &ly, &lw, &lh);
+        if (x >= lx && x < lx + lw && y >= ly && y < ly + lh)
             return i;
     }
     return -1;
@@ -221,7 +367,7 @@ void desktop_draw_window(int x, int y, int w, int h, const char *title)
     int bx, by;
 
     /* 阴影 */
-    fb_fillrect(x + 5, y + 5, w, h, RGB(0x00, 0x00, 0x00));
+    fb_fillrect(x + 5, y + 5, w, h, theme_get(THEME_SHADOW));
     /* 边框 + 客户区 */
     fb_fillrect(x, y, w, h, theme_get(THEME_WINDOW_BORDER));
     fb_fillrect(x + 1, y + 1, w - 2, h - 2, theme_get(THEME_WINDOW_BG));
@@ -236,32 +382,29 @@ void desktop_draw_window(int x, int y, int w, int h, const char *title)
     font_drawchar(bx + 6, by + 1, 'x', theme_get(THEME_TITLE_TEXT), 1);
 }
 
-static void draw_icon(int x, int y, unsigned int color, const char *label)
+/* 启动图标：色块 + 白线稿高光 + 首字母（沿用原桌面图标配色键） */
+static void draw_launcher_item(int i)
 {
-    fb_fillrect(x, y, ICON_SIZE, ICON_SIZE, color);
-    fb_rect(x, y, ICON_SIZE, ICON_SIZE, RGB(0xFF, 0xFF, 0xFF));
-    /* 图标内部高光，避免纯色块太单调 */
-    fb_fillrect(x + 8, y + 8, ICON_SIZE - 16, 6, RGB(0xFF, 0xFF, 0xFF));
-    font_drawtext(x, y + ICON_SIZE + 8, label, RGB(0xFF, 0xFF, 0xFF), 1);
+    int x, y, w, h;
+
+    launch_rect(i, &x, &y, &w, &h);
+    fb_fillrect(x, y, w, h, theme_get(launch_theme[i]));
+    fb_rect(x, y, w, h, theme_get(THEME_ICON_ART));
+    fb_fillrect(x + 5, y + 5, w - 10, 4, theme_get(THEME_ICON_ART));
+    font_drawchar(x + (w - 8) / 2, y + (h - 16) / 2, launch_letter[i],
+                  theme_get(THEME_ICON_ART), 1);
 }
 
 /* ---- 任务栏绘制（整条或局部，两处共用） ---- */
 
+static void draw_taskbar_content(int rx, int ry, int rw, int rh);
+
 static void draw_taskbar(int W, int H)
 {
-    int sx, sy, sw, sh;
-
     (void)W;
     fb_fillrect(bar_x(), 0, TASKBAR_W, H, theme_get(THEME_TASKBAR));
     fb_vline(bar_x(), 0, H, theme_get(THEME_TASKBAR_LINE));
-
-    start_rect(&sx, &sy, &sw, &sh);
-    fb_fillrect(sx, sy, sw, sh, theme_get(THEME_ACCENT));
-    /* "Start" 40px 宽，按钮 36px —— 居中画，允许压过按钮边 2px */
-    font_drawtext(sx + (sw - 40) / 2, sy + 8, "Start",
-                  theme_get(THEME_TITLE_TEXT), 1);
-
-    desktop_draw_clock();
+    draw_taskbar_content(0, 0, W, H);
 }
 
 static void draw_taskbar_strip(int W, int H)
@@ -272,7 +415,7 @@ static void draw_taskbar_strip(int W, int H)
 
 /* ---- 合成器底层：按矩形重画桌面上"属于桌面层"的内容 ----
  *
- * 只负责桌面层(壁纸/图标/终端窗口框/任务栏)，不含控制台内容
+ * 只负责桌面层(壁纸/终端窗口框/任务栏)，不含控制台内容
  * (console.c 自己有 console_repaint_region)和窗口/光标(ui.c 的层)。
  */
 
@@ -296,11 +439,156 @@ static void fill_clip(int ax, int ay, int aw, int ah,
         fb_fillrect(x0, y0, x1 - x0, y1 - y0, color);
 }
 
+/* 描点画实心圆(头像用,无位图) */
+static void fill_circle(int cx, int cy, int r, unsigned int color)
+{
+    int dx, dy;
+
+    for (dy = -r; dy <= r; dy++)
+        for (dx = -r; dx <= r; dx++)
+            if (dx * dx + dy * dy <= r * r)
+                fb_putpixel(cx + dx, cy + dy, color);
+}
+
+static void draw_avatar(int ax, int ay, int aw, int ah)
+{
+    int cx = ax + aw / 2;
+
+    fb_fillrect(ax, ay, aw, ah, theme_get(THEME_TASKBAR));
+    fb_rect(ax, ay, aw, ah, theme_get(THEME_TASKBAR_LINE));
+    fill_circle(cx, ay + 13, 6, theme_get(THEME_TEXT_DIM));      /* 头 */
+    fill_circle(cx, ay + 23, 8, theme_get(THEME_TEXT_DIM));      /* 肩 */
+    fb_fillrect(cx - 8, ay + 21, 17, 11, theme_get(THEME_TEXT_DIM));
+}
+
+/* 任务栏内容: 头像 + Start + 运行中程序 + 时钟(逐项矩形裁剪,供整条与局部重画共用) */
+static void draw_taskbar_content(int rx, int ry, int rw, int rh)
+{
+    int ax, ay, aw, ah;
+    int sx, sy, sw, sh;
+    int i;
+
+    avatar_rect(&ax, &ay, &aw, &ah);
+    if (rects_intersect(rx, ry, rw, rh, ax, ay, aw, ah))
+        draw_avatar(ax, ay, aw, ah);
+
+    start_rect(&sx, &sy, &sw, &sh);
+    if (rects_intersect(rx, ry, rw, rh, sx, sy, sw, sh)) {
+        fb_fillrect(sx, sy, sw, sh, theme_get(THEME_ACCENT));
+        /* "Start" 40px 宽，按钮 36px —— 居中画，允许压过按钮边 2px */
+        font_drawtext(sx + (sw - 40) / 2, sy + 8, "Start",
+                      theme_get(THEME_TITLE_TEXT), 1);
+    }
+
+    /* 启动图标(每项独立矩形裁剪) */
+    for (i = 0; i < LAUNCH_N; i++) {
+        int lx, ly, lw, lh;
+
+        launch_rect(i, &lx, &ly, &lw, &lh);
+        if (rects_intersect(rx, ry, rw, rh, lx, ly, lw, lh))
+            draw_launcher_item(i);
+    }
+
+    if (running_provider != 0) {
+        int ox, oy;
+        int cly, max_items;
+
+        apps_origin(&ox, &oy);
+        clock_rect(0, &cly, 0, 0);      /* 运行程序栏不得压过底部时钟 */
+        max_items = (cly - oy) / APP_ITEM_H;
+        if (max_items > 16)
+            max_items = 16;
+        for (i = 0; i < max_items; i++) {
+            char title[24];
+            int ix = ox, iy = oy + i * APP_ITEM_H;
+            int iw = TASKBAR_W - 12, ih = APP_ITEM_H - 4;
+            int wxr, wyr, wwr, whr;
+
+            if (!running_provider(i, &wxr, &wyr, &wwr, &whr,
+                                  title, (int)sizeof title))
+                break;
+            if (!rects_intersect(rx, ry, rw, rh, ix, iy, iw, ih))
+                continue;
+            fb_fillrect(ix, iy, iw, ih, theme_get(THEME_WINDOW_BG));
+            fb_rect(ix, iy, iw, ih, theme_get(THEME_TASKBAR_LINE));
+            font_drawtext(ix + 4, iy + 9, title, theme_get(THEME_TEXT), 1);
+        }
+    }
+
+    desktop_draw_clock();
+}
+
+/* 雷达图本体: 4x4 网格 + 绿色窗口点 + 白色视口点 */
+static void draw_minimap(void)
+{
+    int mx, my, mw, mh;
+    int vx, vy, cw, ch;
+    int i;
+
+    minimap_rect(&mx, &my, &mw, &mh);
+    fb_fillrect(mx, my, mw, mh, theme_get(THEME_TASKBAR));
+    fb_rect(mx, my, mw, mh, theme_get(THEME_TASKBAR_LINE));
+
+    for (i = 1; i < CANVAS_COLS; i++)
+        fb_vline(mx + i * mw / CANVAS_COLS, my + 1, mh - 2,
+                 theme_get(THEME_TASKBAR_LINE));
+    for (i = 1; i < CANVAS_ROWS; i++)
+        fb_hline(mx + 1, my + i * mh / CANVAS_ROWS, mw - 2,
+                 theme_get(THEME_TASKBAR_LINE));
+
+    cw = (int)fb.width * CANVAS_COLS;
+    ch = (int)fb.height * CANVAS_ROWS;
+    desktop_canvas_vp(&vx, &vy);
+
+    if (running_provider != 0) {
+        for (i = 0; i < 16; i++) {
+            int wxr, wyr, wwr, whr;
+            char title[24];
+
+            if (!running_provider(i, &wxr, &wyr, &wwr, &whr,
+                                  title, (int)sizeof title))
+                break;
+            fb_fillrect(mx + (wxr + wwr / 2) * mw / cw - 1,
+                        my + (wyr + whr / 2) * mh / ch - 1,
+                        3, 3, theme_get(THEME_ACCENT));
+        }
+    }
+
+    fb_fillrect(mx + (vx + (int)fb.width / 2) * mw / cw - 2,
+                my + (vy + (int)fb.height / 2) * mh / ch - 2,
+                5, 5, theme_get(THEME_TITLEBAR));
+}
+
+/* 每屏左下角画屏号(画布定向用;世界层,随视口平移) */
+static void draw_screen_labels(int rx, int ry, int rw, int rh)
+{
+    int W = (int)fb.width, H = (int)fb.height;
+    int col, row;
+    const char *d = "0123456789";
+
+    for (row = 0; row < CANVAS_ROWS; row++)
+        for (col = 0; col < CANVAS_COLS; col++) {
+            int sx = col * W - vp_x + 8;
+            int sy = row * H - vp_y + H - 20;
+            char tag[6];
+            int i = 0;
+
+            if (!rects_intersect(rx, ry, rw, rh, sx - 2, sy - 2, 44, 18))
+                continue;
+            if (sx < -44 || sx >= W || sy < 0 || sy >= H)
+                continue;
+            tag[i++] = d[col + 1];
+            tag[i++] = ',';
+            tag[i++] = d[row + 1];
+            tag[i] = '\0';
+            font_drawtext(sx, sy, tag, theme_get(THEME_TEXT_DIM), 1);
+        }
+}
+
 void desktop_repaint_region(int x, int y, int w, int h)
 {
     int W = (int)fb.width;
     int H = (int)fb.height;
-    int i;
     int wall_w;                 /* 壁纸实际绘制宽度(给任务栏让位) */
 
     if (x < 0) { w += x; x = 0; }
@@ -310,7 +598,7 @@ void desktop_repaint_region(int x, int y, int w, int h)
     if (w <= 0 || h <= 0)
         return;
 
-    /* z 序与 desktop_draw(全屏)严格一致：壁纸 → 图标 → 终端框 → 任务栏。
+    /* z 序与 desktop_draw(全屏)严格一致：壁纸 → 终端框 → 任务栏。
      * 教训：曾把任务栏带放在壁纸之前，而壁纸 hline 按整个矩形宽度画、
      * 没给任务栏让位 —— 光标一经过右缘，任务栏就被壁纸盖出色块(拖块)。 */
 
@@ -361,23 +649,10 @@ void desktop_repaint_region(int x, int y, int w, int h)
         }
     }
 
-    /* 图标(含标签) */
-    {
-        static const int iy[4] = { 60, 150, 240, 330 };
-        static const char *lb[4] = { "Files", "Terminal", "Settings", "About" };
-        unsigned int ic[4];
+    /* 屏号标签(画布定向) */
+    draw_screen_labels(x, y, w, h);
 
-        ic[0] = theme_get(THEME_ICON_FILES);
-        ic[1] = theme_get(THEME_ICON_TERMINAL);
-        ic[2] = theme_get(THEME_ICON_SETTINGS);
-        ic[3] = theme_get(THEME_ICON_ABOUT);
-
-        for (i = 0; i < 4; i++) {
-            if (rects_intersect(x, y, w, h,
-                                ICON_X, iy[i], ICON_SIZE, ICON_SIZE + 24))
-                draw_icon(ICON_X, iy[i], ic[i], lb[i]);
-        }
-    }
+    /* v0.7 起桌面不放图标(启动入口在任务栏) */
 
     /* 终端窗口：可关闭。隐藏时这块就只是壁纸。 */
     if (term_visible != 0) {
@@ -385,8 +660,10 @@ void desktop_repaint_region(int x, int y, int w, int h)
         int Wn = SHELL_WIN_W, Hn = SHELL_WIN_H;
 
         /* 阴影(窗口右侧与下侧各 5px) */
-        fill_clip(X + Wn, Y + 5, 5, Hn - 5, x, y, w, h, RGB(0, 0, 0));
-        fill_clip(X + 5, Y + Hn, Wn, 5, x, y, w, h, RGB(0, 0, 0));
+        fill_clip(X + Wn, Y + 5, 5, Hn - 5, x, y, w, h,
+                  theme_get(THEME_SHADOW));
+        fill_clip(X + 5, Y + Hn, Wn, 5, x, y, w, h,
+                  theme_get(THEME_SHADOW));
 
         /* 客户区底色 = 窗口内整个矩形(后续带再盖上去) */
         fill_clip(X + 1, Y + 1, Wn - 2, Hn - 2, x, y, w, h,
@@ -429,26 +706,27 @@ void desktop_repaint_region(int x, int y, int w, int h)
     if (taskbar_visible != 0) {
         if (x + w > bar_x()) {
             int bx = (x > bar_x()) ? x : bar_x();
-            int sxx, syy, sww, shh;
 
             /* 竖条整段重画(交集范围) */
             fb_fillrect(bx, y, x + w - bx, h, theme_get(THEME_TASKBAR));
             if (bx == bar_x())
                 fb_vline(bar_x(), y, h, theme_get(THEME_TASKBAR_LINE));
 
-            /* Start 按钮 */
-            start_rect(&sxx, &syy, &sww, &shh);
-            if (rects_intersect(x, y, w, h, sxx, syy, sww, shh)) {
-                fb_fillrect(sxx, syy, sww, shh, theme_get(THEME_ACCENT));
-                font_drawtext(sxx + (sww - 40) / 2, syy + 8, "Start",
-                              theme_get(THEME_TITLE_TEXT), 1);
-            }
-            /* 时钟区:整区重画(它自清自绘) */
-            desktop_draw_clock();
+            /* 任务栏内容(头像/Start/运行程序/时钟,逐项矩形裁剪) */
+            draw_taskbar_content(x, y, w, h);
         }
     } else {
         if (x + w > W - TASKBAR_STRIP)
             draw_taskbar_strip(W, H);
+    }
+
+    /* 雷达图(视口固定层,最上) */
+    {
+        int mmx, mmy, mmw, mmh;
+
+        minimap_rect(&mmx, &mmy, &mmw, &mmh);
+        if (rects_intersect(x, y, w, h, mmx, mmy, mmw, mmh))
+            draw_minimap();
     }
 }
 
@@ -461,11 +739,10 @@ void desktop_draw(const struct multiboot_info *mbi)
 
     draw_wallpaper(w, h);
 
-    /* 左侧桌面图标 */
-    draw_icon(ICON_X, icon_y[0], theme_get(THEME_ICON_FILES), "Files");
-    draw_icon(ICON_X, icon_y[1], theme_get(THEME_ICON_TERMINAL), "Terminal");
-    draw_icon(ICON_X, icon_y[2], theme_get(THEME_ICON_SETTINGS), "Settings");
-    draw_icon(ICON_X, icon_y[3], theme_get(THEME_ICON_ABOUT), "About");
+    /* 屏号标签(画布定向) */
+    draw_screen_labels(0, 0, w, h);
+
+    /* v0.7 起桌面不放图标(启动入口在任务栏),画布只留壁纸/屏号/窗口 */
 
     /* 终端窗口外框（内容区由 console_init 填充）；可被 × 关闭 */
     if (term_visible != 0) {
@@ -486,4 +763,7 @@ void desktop_draw(const struct multiboot_info *mbi)
         draw_taskbar(w, h);
     else
         draw_taskbar_strip(w, h);
+
+    /* 雷达图(右下角,任务栏左侧) */
+    draw_minimap();
 }

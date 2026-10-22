@@ -13,3 +13,22 @@ iso/
 # 编辑器
 *.swp
 *~
+
+# 构建产物(x64 构建用 .o64 后缀)
+*.o64
+iso64/
+
+# 无头验证日志
+*.log
+
+# .new 工作流残留
+*.new
+
+# 临时探针
+_wtest.txt
+apps/.probe.tmp
+mon.out
+shot.ppm
+s1.ppm
+s2.ppm
+s3.ppm

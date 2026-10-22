@@ -6,6 +6,7 @@
  */
 #include "fs.h"
 #include "heap.h"
+#include "ata.h"
 
 #define FS_MAX_ENTRIES 96
 
@@ -253,7 +254,10 @@ int fs_create_file(const char *path)
 
     if (n >= 0)
         return FS_EXISTS;
-    return create_node(path, 0);
+    n = create_node(path, 0);
+    if (n >= 0)
+        fs_sync();
+    return n;
 }
 
 int fs_create_dir(const char *path)
@@ -262,7 +266,10 @@ int fs_create_dir(const char *path)
 
     if (n >= 0)
         return FS_EXISTS;
-    return create_node(path, 1);
+    n = create_node(path, 1);
+    if (n >= 0)
+        fs_sync();
+    return n;
 }
 
 int fs_write(const char *path, const void *data, int len)
@@ -299,6 +306,7 @@ int fs_write(const char *path, const void *data, int len)
         kfree(nodes[n].data);
     nodes[n].data = buf;
     nodes[n].size = len;
+    fs_sync();
     return FS_OK;
 }
 
@@ -334,6 +342,7 @@ int fs_append(const char *path, const void *data, int len)
         kfree(nodes[n].data);
     nodes[n].data = buf;
     nodes[n].size = old + len;
+    fs_sync();
     return FS_OK;
 }
 
@@ -374,6 +383,41 @@ int fs_delete(const char *path)
         nodes[n].data = 0;
     }
     nodes[n].used = 0;
+    fs_sync();
+    return FS_OK;
+}
+
+static void rmtree_recur(int n)
+{
+    int i;
+
+    for (i = 1; i < FS_MAX_ENTRIES; i++) {
+        if (nodes[i].used && nodes[i].parent == n) {
+            if (nodes[i].is_dir)
+                rmtree_recur(i);        /* 先深删它的子树 */
+            if (nodes[i].data != 0) {
+                kfree(nodes[i].data);
+                nodes[i].data = 0;
+            }
+            nodes[i].used = 0;
+        }
+    }
+}
+
+/* 递归删除:文件或整棵目录树。根目录拒绝。 */
+int fs_rmtree(const char *path)
+{
+    int n = resolve(path);
+
+    if (n <= 0)
+        return (n == 0) ? FS_ERR : FS_NOTFOUND;
+    rmtree_recur(n);                    /* 清空孩子 */
+    if (nodes[n].data != 0) {           /* n 自己若是文件,释放内容 */
+        kfree(nodes[n].data);
+        nodes[n].data = 0;
+    }
+    nodes[n].used = 0;
+    fs_sync();
     return FS_OK;
 }
 
@@ -412,3 +456,227 @@ void fs_stats(int *used_entries, int *total_entries, int *bytes_used)
     if (total_entries) *total_entries = FS_MAX_ENTRIES - 1;
     if (bytes_used) *bytes_used = b;
 }
+
+/* ---- 持久化:ATA PIO 镜像(ATA 见 mode/ata.c) ----
+ *
+ * 磁盘布局(LBA):
+ *   0     超级块(magic "YCFS1")
+ *   1..12 条目表(96 x 64 字节 = 6144 字节)
+ *   13..  数据区(文件内容顺序排布,512 对齐)
+ * 写入顺序:数据 -> 条目表 -> 超级块。掉电时最多丢最后一次变更,
+ * 且不会出现"超级块有效但条目表是旧的"状态。
+ */
+
+#define FS_SUPER_SECTOR  0u
+#define FS_TABLE_SECTOR  1u
+#define FS_DE_SIZE       64u
+#define FS_TABLE_SECTORS ((FS_MAX_ENTRIES * FS_DE_SIZE + 511u) / 512u)
+#define FS_DATA_SECTOR   (FS_TABLE_SECTOR + FS_TABLE_SECTORS)
+
+static void fs_zero(void *p, unsigned int n)
+{
+    unsigned char *d = (unsigned char *)p;
+
+    while (n--)
+        *d++ = 0;
+}
+
+struct fs_disk_super {
+    unsigned char magic[8];       /* "YCFS1" + 0 填充 */
+    unsigned int  version;
+    unsigned int  entry_count;
+    unsigned int  data_sector;
+    unsigned int  data_bytes;
+    unsigned int  checksum;
+} __attribute__((packed));
+
+struct fs_disk_entry {
+    char          name[FS_NAME_MAX];
+    short         parent;
+    unsigned char is_dir;
+    unsigned char used;
+    unsigned int  size;
+    unsigned int  offset;         /* 相对数据区起点(512 对齐) */
+    unsigned char pad[FS_DE_SIZE - FS_NAME_MAX - 2 - 1 - 1 - 4 - 4];
+} __attribute__((packed));
+
+static int fs_persist;
+
+int fs_persist_enabled(void) { return fs_persist; }
+
+int fs_sync(void)
+{
+    static unsigned char tbl[FS_MAX_ENTRIES * FS_DE_SIZE];
+    static unsigned char sec[512];
+    struct fs_disk_super sup;
+    unsigned int i, off = 0;
+    unsigned int k;
+
+    if (!fs_persist || !ata_ready())
+        return -1;
+
+    /* 1) 条目表:重建并累计数据偏移 */
+    fs_zero(tbl, sizeof tbl);
+    for (i = 0; i < FS_MAX_ENTRIES; i++) {
+        struct fs_disk_entry *de =
+            (struct fs_disk_entry *)(void *)(tbl + i * FS_DE_SIZE);
+        int j;
+
+        if (!nodes[i].used)
+            continue;
+        for (j = 0; j < FS_NAME_MAX - 1 && nodes[i].name[j]; j++)
+            de->name[j] = nodes[i].name[j];
+        de->name[j] = '\0';
+        de->parent = (short)nodes[i].parent;
+        de->is_dir = (unsigned char)(nodes[i].is_dir ? 1 : 0);
+        de->used   = 1;
+        de->size   = (unsigned int)nodes[i].size;
+        if (!nodes[i].is_dir) {
+            de->offset = off;
+            off += ((unsigned int)nodes[i].size + 511u) & ~511u;
+        }
+    }
+
+    /* 2) 数据区:逐文件整扇区写(尾部补零) */
+    for (i = 0; i < FS_MAX_ENTRIES; i++) {
+        struct fs_disk_entry *de =
+            (struct fs_disk_entry *)(void *)(tbl + i * FS_DE_SIZE);
+        unsigned int lba, full, tail;
+
+        if (!nodes[i].used || nodes[i].is_dir || nodes[i].size == 0)
+            continue;
+        lba  = FS_DATA_SECTOR + de->offset / 512u;
+        full = (unsigned int)nodes[i].size / 512u;
+        tail = (unsigned int)nodes[i].size % 512u;
+
+        if (full > 0
+            && ata_write_sectors(lba, nodes[i].data, full) != 0)
+            return -2;
+        if (tail > 0) {
+            fs_zero(sec, 512);
+            for (k = 0; k < tail; k++)
+                sec[k] = nodes[i].data[full * 512u + k];
+            if (ata_write_sectors(lba + full, sec, 1) != 0)
+                return -2;
+        }
+    }
+
+    /* 3) 条目表 */
+    if (ata_write_sectors(FS_TABLE_SECTOR, tbl, FS_TABLE_SECTORS) != 0)
+        return -3;
+
+    /* 4) 超级块最后写 */
+    fs_zero(&sup, sizeof sup);
+    sup.magic[0] = 'Y';
+    sup.magic[1] = 'C';
+    sup.magic[2] = 'F';
+    sup.magic[3] = 'S';
+    sup.magic[4] = '1';
+    sup.version     = 1;
+    sup.entry_count = FS_MAX_ENTRIES;
+    sup.data_sector = FS_DATA_SECTOR;
+    sup.data_bytes  = off;
+    sup.checksum    = (unsigned int)FS_MAX_ENTRIES + off + FS_DATA_SECTOR;
+
+    fs_zero(sec, 512);
+    for (i = 0; i < 512u; i++)
+        sec[i] = (i < sizeof sup) ? ((const unsigned char *)&sup)[i] : 0u;
+    if (ata_write_sectors(FS_SUPER_SECTOR, sec, 1) != 0)
+        return -4;
+
+    return 0;
+}
+
+int fs_persist_init(void)
+{
+    static unsigned char tbl[FS_MAX_ENTRIES * FS_DE_SIZE];
+    static unsigned char sec[512];
+    struct fs_disk_super *sup = (struct fs_disk_super *)(void *)sec;
+    unsigned int i;
+
+    fs_persist = 0;
+    if (!ata_ready())
+        return -1;                    /* 无盘:纯内存,旧行为不变 */
+
+    if (ata_read_sectors(FS_SUPER_SECTOR, sec, 1) != 0)
+        return -1;
+
+    if (sup->magic[0] != 'Y' || sup->magic[1] != 'C'
+        || sup->magic[2] != 'F' || sup->magic[3] != 'S'
+        || sup->magic[4] != '1'
+        || sup->entry_count != FS_MAX_ENTRIES
+        || sup->data_sector != FS_DATA_SECTOR) {
+        fs_persist = 1;               /* 空盘:用现有内存树,首次写建镜像 */
+        return 1;
+    }
+
+    if (ata_read_sectors(FS_TABLE_SECTOR, tbl, FS_TABLE_SECTORS) != 0) {
+        fs_persist = 1;
+        return 1;
+    }
+
+    /* 清空内存树(根保留),按条目表重建 */
+    for (i = 1; i < FS_MAX_ENTRIES; i++) {
+        if (nodes[i].data != 0)
+            kfree(nodes[i].data);
+        nodes[i].data = 0;
+        nodes[i].used = 0;
+    }
+
+    for (i = 1; i < FS_MAX_ENTRIES; i++) {
+        const struct fs_disk_entry *de =
+            (const struct fs_disk_entry *)(const void *)
+            (tbl + i * FS_DE_SIZE);
+        unsigned int j;
+
+        if (!de->used)
+            continue;
+        for (j = 0; j < FS_NAME_MAX - 1 && de->name[j]; j++)
+            nodes[i].name[j] = de->name[j];
+        nodes[i].name[j] = '\0';
+        nodes[i].parent = de->parent;
+        nodes[i].is_dir = de->is_dir ? 1 : 0;
+        nodes[i].size   = (int)de->size;
+        nodes[i].data   = 0;
+
+        if (!nodes[i].is_dir && de->size > 0) {
+            unsigned int lba = FS_DATA_SECTOR + de->offset / 512u;
+            unsigned int full = de->size / 512u;
+            unsigned int tail = de->size % 512u;
+            unsigned char *dst;
+
+            if (de->size > FS_MAX_FILE) {
+                nodes[i].used = 0;
+                continue;
+            }
+            dst = kmalloc(de->size);
+            if (dst == 0) {
+                nodes[i].used = 0;    /* 堆不足:丢弃该文件 */
+                continue;
+            }
+            if (full > 0
+                && ata_read_sectors(lba, dst, full) != 0) {
+                kfree(dst);
+                nodes[i].used = 0;
+                continue;
+            }
+            if (tail > 0) {
+                unsigned int k;
+
+                if (ata_read_sectors(lba + full, sec, 1) != 0) {
+                    kfree(dst);
+                    nodes[i].used = 0;
+                    continue;
+                }
+                for (k = 0; k < tail; k++)
+                    dst[full * 512u + k] = sec[k];
+            }
+            nodes[i].data = dst;
+        }
+        nodes[i].used = 1;
+    }
+
+    fs_persist = 1;
+    return 0;
+}
+

@@ -132,3 +132,46 @@ void paging64_walk_dump(uint64_t va)
     ser_puts64(b);
     ser_puts64("\r\n");
 }
+
+
+/* 范围沿途各级置 U/S:ring3 执行区 + 栈窗(见 exec64.c)。
+ * U/S 是四级表项的 AND —— boot32 建的上层(pml4e/pdpte)不带 U/S,
+ * 只动 PDE 无效,必须逐级补。高层级虽被全地址空间共享,但有效
+ * U/S = 各级 AND,除本范围的 PD 项外无人带 U/S,暴露面不放大。
+ * 恒等映射是 2MB 大页,0x400000-0x800000 为保留空窗无内核对象,
+ * 不需要 set_ro 那样拆 4KB 页表。 */
+void paging64_set_user_range(uint64_t start, uint64_t len)
+{
+    uint64_t a, end = start + len;
+    uint64_t *pml4t = (uint64_t *)(unsigned long)read_cr3();
+    uint64_t cr3;
+
+    for (a = start & ~0x1FFFFFull; a < end; a += 0x200000ull) {
+        uint64_t *pml4e = &pml4t[(a >> 39) & 0x1FF];
+        uint64_t *pdpt;
+        uint64_t *pd;
+        uint64_t *e;
+
+        if ((*pml4e & P64_PRESENT) == 0)
+            continue;
+        *pml4e |= (1ull << 2);          /* U/S: pml4e */
+
+        pdpt = next_table(pml4t, a, 39);
+        if (pdpt == 0)
+            continue;
+        e = &pdpt[(a >> 30) & 0x1FF];
+        if ((*e & P64_PRESENT) == 0)
+            continue;
+        *e |= (1ull << 2);              /* U/S: pdpte */
+
+        pd = next_table(pdpt, a, 30);
+        if (pd == 0)
+            continue;
+        e = &pd[(a >> 21) & 0x1FF];
+        if ((*e & P64_PRESENT) != 0)
+            *e |= (1ull << 2);          /* U/S: pde(2MB 页) */
+    }
+
+    cr3 = read_cr3();                   /* 刷整个 TLB */
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}

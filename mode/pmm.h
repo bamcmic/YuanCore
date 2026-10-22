@@ -8,9 +8,10 @@
 
 void         pmm_init(const struct multiboot_info *mbi);
 
-/* 返回物理帧基址(4K 对齐)，耗尽返回 0 */
-unsigned int pmm_alloc_frame(void);
-void         pmm_free_frame(unsigned int addr);
+/* 返回物理帧基址(4K 对齐)，耗尽返回 0。
+ * 帧基址用 64 位：物理内存上限 16GB，超出 32 位范围。 */
+unsigned long long pmm_alloc_frame(void);
+void               pmm_free_frame(unsigned long long addr);
 
 unsigned int pmm_total_kb(void);
 unsigned int pmm_free_kb(void);

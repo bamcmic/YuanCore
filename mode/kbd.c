@@ -16,7 +16,7 @@
 
 #define KB_BUF 64
 
-static volatile unsigned char buf[KB_BUF];
+static volatile int buf[KB_BUF];   /* KEY_* 扩展键 0x100+, 必须存 int */
 static volatile unsigned int  head, tail;
 
 static int shift_down;
@@ -52,13 +52,13 @@ static void buf_push(int c)
 
     if (next == tail)
         return;                     /* 缓冲满，丢键 */
-    buf[head] = (unsigned char)c;
+    buf[head] = c;
     head = next;
 }
 
 static int buf_pop(void)
 {
-    unsigned char c;
+    int c;
 
     if (tail == head)
         return -1;

@@ -1,8 +1,8 @@
 /* x64/idt64.c - x86-64 中断描述符表与分发
  *
  * 门描述符 16 字节:offset_lo16 sel16 ist8 type8 offset_mid16 offset_hi32 zero32
- * 异常分发:ring0 的致命异常画 panic 页;用户程序与 int 0x80 暂无(x64 版
- * exec 默认禁用)。
+ * 异常分发:ring0 致命异常画 panic 页;向量 128 是 DPL3 系统调用门
+ * (ring3 int 0x80 进入,经 TSS.rsp0 切内核栈)。
  */
 #include "idt64.h"
 #include "registers64.h"
@@ -13,8 +13,10 @@
 
 void print_panic64(const struct irq_frame64 *r);   /* kernel64.c */
 void irq64_dispatch(struct irq_frame64 *r);        /* irq64.c(含 EOI) */
+extern void isr64_int80(void);                     /* isr64.asm */
 
 #define IDT64_ENTRIES 256
+#define VEC_SYSCALL 128
 
 struct idt_gate64 {
     uint16_t offset_lo;
@@ -44,15 +46,21 @@ uint64_t idt64_page_base(void)
     return (uint64_t)(unsigned long)idt;
 }
 
-void idt64_set_gate(int n, uint64_t handler)
+/* dpl:允许触发的最低特权(3 = ring3 可用 int 指令触发) */
+void idt64_set_gate_dpl(int n, uint64_t handler, int dpl)
 {
     idt[n].offset_lo  = (uint16_t)(handler & 0xFFFF);
     idt[n].selector   = 0x08;
     idt[n].ist        = 0;
-    idt[n].flags      = 0x8E;       /* present, ring0, interrupt gate */
+    idt[n].flags      = (uint8_t)(0x8E | ((dpl & 3) << 5));
     idt[n].offset_mid = (uint16_t)((handler >> 16) & 0xFFFF);
     idt[n].offset_hi  = (uint32_t)(handler >> 32);
     idt[n].zero       = 0;
+}
+
+void idt64_set_gate(int n, uint64_t handler)
+{
+    idt64_set_gate_dpl(n, handler, 0);
 }
 
 void irq64_register(int vector, irq64_handler_t h)
@@ -61,12 +69,22 @@ void irq64_register(int vector, irq64_handler_t h)
         handlers[vector] = h;
 }
 
+/* int 0x80 系统调用门登记(ring3 可触发)。handler 由 syscall.c 注入,
+ * 签名同 irq64_handler_t:收到 irq_frame64* 后从 rax 取调用号。 */
+void syscall64_register_gate(irq64_handler_t h)
+{
+    idt64_set_gate_dpl(VEC_SYSCALL, (uint64_t)(unsigned long)isr64_int80, 3);
+    irq64_register(VEC_SYSCALL, h);
+}
+
 int idt_verify(void)
 {
     if (idt[14].selector != 0x08 || (idt[14].flags & 0x80) == 0)
         return -1;                  /* Page Fault 门 */
     if (idt[13].selector != 0x08 || (idt[13].flags & 0x80) == 0)
         return -2;                  /* GPF 门 */
+    if (((idt[VEC_SYSCALL].flags >> 5) & 3) != 3)   /* DPL 在 bit5-6,须掩掉 P 等高位 */
+        return -3;                  /* 系统调用门必须 DPL3 */
     return 0;
 }
 
@@ -87,7 +105,6 @@ static void panic64(const struct irq_frame64 *r)
         "x87 FPU Error",           "Alignment Check",
         "Machine Check",           "SIMD FP Exception",
         "Virtualization Exception","Reserved",
-        "Reserved",                "Reserved",
         "Reserved",                "Reserved",
         "Reserved",                "Reserved",
         "Reserved",                "Reserved",
@@ -187,7 +204,8 @@ static void panic64(const struct irq_frame64 *r)
         hlt();
 }
 
-/* 异常 0-31 与未知向量都进这里;IRQ(32-47) 由 irq64.c 注册分发 */
+/* 异常 0-31 与未知向量都进这里;IRQ(32-47) 由 irq64.c 注册分发;
+ * 128 = int 0x80 系统调用(handlers[128] 由 syscall.c 注入)。 */
 void x64_irq_dispatch(void *framep)
 {
     struct irq_frame64 *r = (struct irq_frame64 *)framep;
@@ -202,6 +220,12 @@ void x64_irq_dispatch(void *framep)
 
     if (r->int_no >= 32 && r->int_no < 48) {
         irq64_dispatch(r);          /* 查 irq64.c 的表 + EOI */
+        return;
+    }
+
+    /* 48+ 的注册向量(如 128 系统调用):有 handler 就用 */
+    if (handlers[r->int_no] != 0) {
+        handlers[r->int_no](r);
         return;
     }
 

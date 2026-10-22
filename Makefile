@@ -36,7 +36,7 @@ X64_EXCLUDE = mode/gdt.c mode/idt.c mode/paging.c mode/tss.c mode/exec.c \
               mode/irq.c
 X64_SRC_C   = $(filter-out $(X64_EXCLUDE),$(SRCS_C)) x64/kernel64.c \
               x64/gdt64.c x64/idt64.c x64/paging64.c x64/irq64.c x64/exec64.c
-X64_SRC_ASM = x64/boot32.asm x64/isr64.asm
+X64_SRC_ASM = x64/boot32.asm x64/isr64.asm x64/switch64.asm
 X64_OBJS    = $(X64_SRC_C:.c=.o64) $(X64_SRC_ASM:.asm=.o64)
 X64_ELF     = mykernel64.elf
 X64_ISO     = YuanCore64.iso
@@ -45,7 +45,8 @@ X64_ISO     = YuanCore64.iso
 #   *.c / *.asm            内核本体
 #   mode/                  内核模块
 #   shell/                 用户态可见的命令行模块（加命令往这里放）
-SRCS_C   = $(wildcard *.c) $(wildcard mode/*.c) $(wildcard shell/*.c)
+SRCS_C   = $(wildcard *.c) $(wildcard mode/*.c) $(wildcard shell/*.c) \
+            $(wildcard net/*.c)
 SRCS_ASM = $(wildcard *.asm) $(wildcard mode/*.asm)
 OBJS     = $(SRCS_C:.c=.o) $(SRCS_ASM:.asm=.o)
 ELF      = mykernel.elf
@@ -76,7 +77,10 @@ help:
 $(X64_ELF): $(X64_OBJS)
 	$(LD) $(X64_LDFLAGS) -o $@ $^
 
-$(X64_ISO): $(X64_ELF)
+# demo.ycp 由 yapps 打包并生成 blob, 内核启动时自动安装。
+# (GRUB multiboot2 不支持 module 传包, .ycp 进 ISO 需 iso9660 驱动,
+#  暂以内嵌 blob 方式分发; apps/ 下的 .ycp 可经 ycp install 安装。)
+$(X64_ISO): apps/demo.ycp apps/smoke.ycp $(X64_ELF)
 	mkdir -p iso64/boot/grub
 	cp $(X64_ELF) iso64/boot/
 	echo 'set timeout=0' > iso64/boot/grub/grub.cfg
@@ -89,16 +93,19 @@ $(X64_ISO): $(X64_ELF)
 x64: $(X64_ISO)
 
 run64: $(X64_ISO)
+	test -f ycdisk.img || truncate -s 64M ycdisk.img
 	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} \
-		$(X64_QEMU) -m 256 -cdrom $(X64_ISO)
+		$(X64_QEMU) -m 16384 -device e1000,netdev=n0 -netdev user,id=n0 \
+			-drive file=ycdisk.img,format=raw,if=ide,index=0 \
+			-cdrom $(X64_ISO)
 
 # OVMF 固件路径按 Debian/Ubuntu 包默认;不同发行版可用 EFI_D= 指定
 EFI_D ?= /usr/share/OVMF
 run-efi: $(X64_ISO)
 	GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 DISPLAY=$${DISPLAY:-:0} \
-		$(X64_QEMU) -m 256 -M q35 \
-		-drive if=pflash,format=raw,readonly=on,file=$(EFI_D)/OVMF_CODE.fd \
-		-drive if=pflash,format=raw,file=$(EFI_D)/OVMF_VARS.fd \
+		$(X64_QEMU) -m 16384 -M q35 \
+		-drive if=pflash,format=raw,readonly=on,file=$(EFI_D)/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=$(EFI_D)/OVMF_VARS_4M.fd \
 		-cdrom $(X64_ISO)
 
 # 链接
@@ -145,11 +152,40 @@ apps/closeall.o: apps/closeall.c apps/ycapi.h
 apps/closeall.app: apps/closeall.o
 	$(LD) -m elf_i386 -e app_main -Ttext-segment=0x400000 -o $@ apps/closeall.o
 
+# ---- YCP1 应用包(x64 ELF64 + stored zip + ycmanifest) ----
+APP64_CFLAGS = -m64 -ffreestanding -fno-pie -fno-stack-protector -O2 \
+               -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -msoft-float
+
+apps/hello64.o: apps/hello64.c apps/ycapi.h
+	$(GCC) $(APP64_CFLAGS) -c $< -o $@
+
+apps/hello64.app: apps/hello64.o
+	$(LD) -m elf_x86_64 -e app_main -Ttext-segment=0x400000 -o $@ apps/hello64.o
+
+apps/demo.ycp: apps/hello64.app tools/make_ycp.py
+	python3 tools/make_ycp.py --elf apps/hello64.app --name hello \
+		--entry hello.app --desc "demo counter window" \
+		--out apps/demo.ycp --blob mode/demo_ycp_blob.h
+
+apps/smoke64.o: apps/smoke64.c apps/ycapi.h
+	$(GCC) $(APP64_CFLAGS) -c $< -o $@
+
+apps/smoke64.app: apps/smoke64.o
+	$(LD) -m elf_x86_64 -e app_main -Ttext-segment=0x400000 -o $@ apps/smoke64.o
+
+apps/smoke.ycp: apps/smoke64.app tools/make_ycp.py
+	python3 tools/make_ycp.py --elf apps/smoke64.app --name smoke \
+		--entry smoke.app --desc "ring3 boot smoke test" \
+		--out apps/smoke.ycp --blob mode/smoke_ycp_blob.h
+
+yapps: apps/demo.ycp apps/smoke.ycp
+
 # 清理
 clean:
 	rm -f $(OBJS) $(ELF) $(ISO) *.d mode/*.d shell/*.d print.o
-	rm -f $(X64_OBJS) $(X64_ELF) $(X64_ISO) x64/*.d *.o64
-	rm -rf iso iso64
+	rm -f $(X64_OBJS) $(X64_ELF) $(X64_ISO) x64/*.d net/*.d *.o64
+	rm -rf iso iso64 apps/demo.ycp mode/demo_ycp_blob.h apps/hello64.o apps/hello64.app \
+		apps/smoke.ycp mode/smoke_ycp_blob.h apps/smoke64.o apps/smoke64.app
 
 # 运行
 # WSLg 下有两个坑，这里一并绕开：

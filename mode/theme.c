@@ -12,25 +12,31 @@ static unsigned int colors[THEME_COLOR_COUNT];
 static int bg_style = THEME_WP_GRADIENT;
 static int clock_show = 1;
 
+/* default 预置 = 浅色(v0.7 起)，dark 观感走 ocean/sunset/matrix 预置 */
 static const unsigned int defaults[THEME_COLOR_COUNT] = {
-    /* BG_TOP */        0x1B3A5C,
-    /* BG_BOTTOM */     0x0B1A2B,
-    /* TASKBAR */       0x14283F,
-    /* TASKBAR_LINE */  0x3D5A7D,
-    /* TITLEBAR */      0x2E6CB0,
+    /* BG_TOP */        0xE8ECF2,
+    /* BG_BOTTOM */     0xC8D0DC,
+    /* TASKBAR */       0xD8DEE8,
+    /* TASKBAR_LINE */  0xA8B0BC,
+    /* TITLEBAR */      0x3D6FA8,
     /* TITLE_TEXT */    0xFFFFFF,
-    /* WINDOW_BG */     0xF2F4F7,
-    /* WINDOW_BORDER */ 0x8A94A6,
-    /* TEXT */          0x1F242E,
-    /* TEXT_DIM */      0x6B7482,
-    /* ACCENT */        0x359E74,
-    /* DANGER */        0xC03B3B,
-    /* CONSOLE_FG */    0x1F242E,
-    /* CONSOLE_BG */    0xF2F4F7,
-    /* ICON_FILES */    0x3B82C4,
-    /* ICON_TERMINAL */ 0x2C333D,
-    /* ICON_SETTINGS */ 0x6B7482,
-    /* ICON_ABOUT */    0x359E74
+    /* WINDOW_BG */     0xFFFFFF,
+    /* WINDOW_BORDER */ 0xA8B0BC,
+    /* TEXT */          0x20242E,
+    /* TEXT_DIM */      0x707884,
+    /* ACCENT */        0x2E8B57,
+    /* DANGER */        0xB03A3A,
+    /* CONSOLE_FG */    0x20242E,
+    /* CONSOLE_BG */    0xFFFFFF,
+    /* ICON_FILES */    0x4A90C4,
+    /* ICON_TERMINAL */ 0x505A68,
+    /* ICON_SETTINGS */ 0x8892A0,
+    /* ICON_ABOUT */    0x2E8B57,
+    /* SHADOW */        0x000000,
+    /* ICON_ART */      0xFFFFFF,
+    /* ICON_LABEL */    0x20242E,
+    /* CURSOR_HALO */   0xFFFFFF,
+    /* CURSOR_BODY */   0x000000
 };
 
 static const char *key_names[THEME_COLOR_COUNT] = {
@@ -38,7 +44,8 @@ static const char *key_names[THEME_COLOR_COUNT] = {
     "titlebar", "title_text", "window_bg", "window_border",
     "text", "text_dim", "accent", "danger",
     "console_fg", "console_bg",
-    "icon_files", "icon_terminal", "icon_settings", "icon_about"
+    "icon_files", "icon_terminal", "icon_settings", "icon_about",
+    "shadow", "icon_art", "icon_label", "cursor_halo", "cursor_body"
 };
 
 /* ---- 预置主题 ---- */
@@ -53,7 +60,8 @@ static const unsigned int p_ocean[THEME_COLOR_COUNT] = {
     0x1D7FA8, 0xFFFFFF, 0xF0F7FA, 0x7FA6B5,
     0x12303C, 0x5B7A87, 0x2FA8A0, 0xB0452E,
     0x12303C, 0xEAF4F8,
-    0x2E86AB, 0x1F3B4D, 0x5B7A87, 0x2FA8A0
+    0x2E86AB, 0x1F3B4D, 0x5B7A87, 0x2FA8A0,
+    0x000000, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0x06222F
 };
 
 static const unsigned int p_sunset[THEME_COLOR_COUNT] = {
@@ -61,7 +69,8 @@ static const unsigned int p_sunset[THEME_COLOR_COUNT] = {
     0xC0563B, 0xFFF2E8, 0xFBF3EC, 0xA98A7C,
     0x3A1F18, 0x8A6A5C, 0xE0913A, 0xA8324A,
     0x3A1F18, 0xFBF3EC,
-    0xC0563B, 0x4A2438, 0x8A6A5C, 0xE0913A
+    0xC0563B, 0x4A2438, 0x8A6A5C, 0xE0913A,
+    0x1A0A12, 0xFFF2E8, 0xFFF2E8, 0xFFF2E8, 0x2B1024
 };
 
 static const unsigned int p_matrix[THEME_COLOR_COUNT] = {
@@ -69,15 +78,8 @@ static const unsigned int p_matrix[THEME_COLOR_COUNT] = {
     0x00B300, 0x001200, 0x001200, 0x008800,
     0x00E600, 0x009900, 0x00E600, 0xCC0000,
     0x00E600, 0x001200,
-    0x007700, 0x004400, 0x006600, 0x00AA00
-};
-
-static const unsigned int p_light[THEME_COLOR_COUNT] = {
-    0xE8ECF2, 0xC8D0DC, 0xD8DEE8, 0xA8B0BC,
-    0x3D6FA8, 0xFFFFFF, 0xFFFFFF, 0xA8B0BC,
-    0x20242E, 0x707884, 0x2E8B57, 0xB03A3A,
-    0x20242E, 0xFFFFFF,
-    0x4A90C4, 0x505A68, 0x8892A0, 0x2E8B57
+    0x007700, 0x004400, 0x006600, 0x00AA00,
+    0x000000, 0x00E600, 0x00E600, 0x00E600, 0x000500
 };
 
 static const struct preset presets[] = {
@@ -85,7 +87,7 @@ static const struct preset presets[] = {
     { "ocean",   p_ocean   },
     { "sunset",  p_sunset  },
     { "matrix",  p_matrix  },
-    { "light",   p_light   }
+    { "light",   defaults }     /* default 本身已是浅色，light 保留为别名 */
 };
 
 #define PRESET_COUNT (int)(sizeof(presets) / sizeof(presets[0]))

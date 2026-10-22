@@ -6,6 +6,10 @@
  *
  * 读取策略：等 UIP 清零后连读两组，一致才采纳，最多重试几次
  * —— 避免读到更新到一半的时间。
+ *
+ * rtc_write（NTP 同步）：沿用 CMOS 当前的格式位（BCD/二进制、
+ * 12/24h），在 UIP=0 窗口写六个寄存器；写前 cli 保护，防止
+ * RTC 中断/调度插进来打断连续写序列。
  */
 #include "rtc.h"
 #include "io.h"
@@ -45,6 +49,13 @@ static int bcd2bin(int v, int binary_mode)
     if (binary_mode)
         return v;
     return (v & 0x0F) + (v >> 4) * 10;
+}
+
+static int bin2bcd(int v, int binary_mode)
+{
+    if (binary_mode)
+        return v;
+    return ((v / 10) << 4) | (v % 10);
 }
 
 static void grab(struct rtc_time *t, int binary, int hour24)
@@ -101,4 +112,54 @@ int rtc_read(struct rtc_time *out)
         }
     }
     return -1;
+}
+
+int rtc_write(const struct rtc_time *t)
+{
+    unsigned char stb;
+    int binary, hour24;
+    int yr;
+
+    if (t == 0)
+        return -1;
+    if (t->sec < 0 || t->sec > 59 || t->min < 0 || t->min > 59
+        || t->hour < 0 || t->hour > 23 || t->day < 1 || t->day > 31
+        || t->month < 1 || t->month > 12
+        || t->year < 2000 || t->year > 2099)
+        return -1;                      /* 越界值直接拒绝,不写半截 */
+
+    if (wait_uip() != 0)
+        return -1;
+
+    stb    = cmos(REG_STB);
+    binary = (stb & 0x04) != 0;
+    hour24 = (stb & 0x02) != 0;
+
+    yr = t->year % 100;
+
+    cli();                              /* 连续写序列不许被打断 */
+    outb(CMOS_ADDR, REG_SEC);
+    outb(CMOS_DATA, (unsigned char)bin2bcd(t->sec, binary));
+    outb(CMOS_ADDR, REG_MIN);
+    outb(CMOS_DATA, (unsigned char)bin2bcd(t->min, binary));
+    outb(CMOS_ADDR, REG_HOUR);
+    if (hour24) {                       /* QEMU 默认 24h;12h 制按规范带 PM 位 */
+        outb(CMOS_DATA, (unsigned char)bin2bcd(t->hour, binary));
+    } else {
+        int h12 = t->hour % 12;
+
+        if (h12 == 0)
+            h12 = 12;
+        outb(CMOS_DATA, (unsigned char)(bin2bcd(h12, binary)
+              | (t->hour >= 12 ? 0x80 : 0)));
+    }
+    outb(CMOS_ADDR, REG_DAY);
+    outb(CMOS_DATA, (unsigned char)bin2bcd(t->day, binary));
+    outb(CMOS_ADDR, REG_MON);
+    outb(CMOS_DATA, (unsigned char)bin2bcd(t->month, binary));
+    outb(CMOS_ADDR, REG_YEAR);
+    outb(CMOS_DATA, (unsigned char)bin2bcd(yr, binary));
+    sti();
+
+    return 0;
 }

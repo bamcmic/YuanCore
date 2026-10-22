@@ -23,6 +23,8 @@ int  registry_search(const char *query, int *out, int max);
 
 int  registry_launch(int idx);            /* 经启动器执行，返回 exec 的返回码 */
 
+void registry_rescan(void);               /* 重扫 /apps 应用清单 */
+
 /* 把 "apps" 命令挂进 shell（shell.c 的 shell_init 里调一次） */
 void registry_command_init(void);
 

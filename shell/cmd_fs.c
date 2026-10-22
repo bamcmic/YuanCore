@@ -7,6 +7,7 @@
 #include "console.h"
 
 #include "../mode/fs.h"
+#include "../mode/ata.h"
 
 static const char *skip_spaces(const char *s)
 {
@@ -210,13 +211,40 @@ static void cmd_df(const char *args)
     console_puts("\n");
 }
 
+static void cmd_diskinfo(const char *args)
+{
+    (void)args;
+    console_puts("ATA disk : ");
+    if (ata_ready()) {
+        console_puts("ready, ");
+        put_dec(ata_sector_count() / 2048u);
+        console_puts(" MB\n");
+    } else {
+        console_puts("not present (memory-only)\n");
+    }
+    console_puts("persist  : ");
+    console_puts(fs_persist_enabled()
+                 ? "enabled (ramfs backed by disk image)\n"
+                 : "disabled\n");
+}
+
+static void cmd_files(const char *args)
+{
+    extern void app_files_open(void);
+
+    (void)args;
+    app_files_open();
+}
+
 static const struct shell_command fs_cmds[] = {
     { "ls",    "list directory",            cmd_ls    },
     { "cat",   "print a file",              cmd_cat   },
     { "write", "write text to a file",      cmd_write },
     { "mkdir", "create a directory",        cmd_mkdir },
     { "rm",    "delete a file/empty dir",   cmd_rm    },
-    { "df",    "filesystem usage",          cmd_df    }
+    { "df",    "filesystem usage",          cmd_df    },
+    { "diskinfo", "ATA disk and persistence status", cmd_diskinfo },
+    { "files", "open the file manager",          cmd_files }
 };
 
 void cmd_fs_init(void)

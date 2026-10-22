@@ -15,4 +15,8 @@ struct rtc_time {
  * 内部对 UIP（更新中）做了等待和双读一致性校验。 */
 int rtc_read(struct rtc_time *t);
 
+/* 写入时间（NTP 同步用）。按 CMOS 现有格式（BCD/二进制、12/24h）
+ * 编码，UIP=0 时写入。成功返回 0。 */
+int rtc_write(const struct rtc_time *t);
+
 #endif /* RTC_H */

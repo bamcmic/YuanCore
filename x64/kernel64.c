@@ -64,6 +64,33 @@ struct mb2_tag {
 static struct multiboot_info synth_mbi;
 static unsigned char synth_mmap[4096];
 
+/* ---- boot modules(MB2_TAG_MODULES): YCP 应用包由 GRUB 载入内存 ---- */
+#define MB2_MAX_MODULES 8
+static unsigned long mod_start_a[MB2_MAX_MODULES];
+static unsigned long mod_end_a[MB2_MAX_MODULES];
+static char mod_cmd[MB2_MAX_MODULES][64];
+static int mod_cnt;
+
+int mb2_module_count(void)
+{
+    return mod_cnt;
+}
+
+unsigned long mb2_module_start(int i)
+{
+    return (i >= 0 && i < mod_cnt) ? mod_start_a[i] : 0;
+}
+
+unsigned long mb2_module_end(int i)
+{
+    return (i >= 0 && i < mod_cnt) ? mod_end_a[i] : 0;
+}
+
+const char *mb2_module_cmd(int i)
+{
+    return (i >= 0 && i < mod_cnt) ? mod_cmd[i] : 0;
+}
+
 static const struct multiboot_info *parse_mb2(uint64_t mbi_addr)
 {
     struct mb2_tag *tag = (struct mb2_tag *)(unsigned long)(mbi_addr + 8);
@@ -76,6 +103,32 @@ static const struct multiboot_info *parse_mb2(uint64_t mbi_addr)
             break;
 
         switch (tag->type) {
+        case MB2_TAG_MODULES: {
+            struct {
+                uint32_t type;
+                uint32_t size;
+                uint32_t mod_start;
+                uint32_t mod_end;
+                uint32_t cmdline;
+                uint32_t reserved;
+            } *t = (void *)tag;
+            const char *cmd = (const char *)(unsigned long)t->cmdline;
+
+            if (mod_cnt < MB2_MAX_MODULES) {
+                int n = mod_cnt, i = 0;
+
+                mod_start_a[n] = t->mod_start;
+                mod_end_a[n] = t->mod_end;
+                if (cmd != 0)
+                    while (cmd[i] && i < (int)sizeof mod_cmd[0] - 1) {
+                        mod_cmd[n][i] = cmd[i];
+                        i++;
+                    }
+                mod_cmd[n][i] = '\0';
+                mod_cnt = n + 1;
+            }
+            break;
+        }
         case MB2_TAG_MEMINFO: {
             struct {
                 uint32_t type;
@@ -103,8 +156,9 @@ static const struct multiboot_info *parse_mb2(uint64_t mbi_addr)
             while (p + sizeof(struct mb2_mmap_entry) <= end
                    && mm + MB1_MMAP_ENTRY_SIZE <= mm_end) {
                 struct mb2_mmap_entry *e = (struct mb2_mmap_entry *)p;
-                /* 合成 multiboot1 格式:size 在开头 */
-                *(unsigned int *)mm = MB1_MMAP_ENTRY_SIZE;
+                /* 合成 multiboot1 格式:size 在开头,值为 20(不含自身 4 字节,
+                 * 条目总长 24) —— pmm.c 按 MB1 规范 size+4 步进。 */
+                *(unsigned int *)mm = MB1_MMAP_SIZE_FIELD;
                 *(uint64_t *)(void *)(mm + 4)  = e->base;
                 *(uint64_t *)(void *)(mm + 12) = e->length;
                 *(unsigned int *)(void *)(mm + 20) = e->type;

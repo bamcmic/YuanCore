@@ -40,6 +40,7 @@ int  fb_init(const struct multiboot_info *mbi);
 int  fb_ready(void);
 
 void fb_putpixel(int x, int y, unsigned int color);
+unsigned int fb_getpixel(int x, int y);   /* 读回 0x00RRGGBB(16bpp 近似) */
 void fb_hline(int x, int y, int w, unsigned int color);
 void fb_vline(int x, int y, int h, unsigned int color);
 void fb_fillrect(int x, int y, int w, int h, unsigned int color);

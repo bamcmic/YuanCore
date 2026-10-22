@@ -26,7 +26,9 @@ void desktop_draw_window(int x, int y, int w, int h, const char *title);
 
 /* ---- 点击命中（鼠标点击接线的几何依据，与绘制同一份常量） ---- */
 
-/* 桌面图标：返回 0..3（Files/Terminal/Settings/About），没点中返回 -1 */
+/* 任务栏启动图标(Start 之下,36x36)：返回 0..3
+ * （Files/Terminal/Settings/About），没点中返回 -1。
+ * 视口固定层，不做画布平移换算。 */
 int desktop_icon_hit(int x, int y);
 
 /* 任务栏 Start 按钮：点中返回 1 */
@@ -48,7 +50,7 @@ int desktop_clock_ready(void);
 /* 只重画任务栏右侧时钟区（每秒一次，代价是小矩形而非整屏） */
 void desktop_draw_clock(void);
 
-/* 合成器底层：按矩形重画"桌面层"(壁纸/图标/终端框/任务栏)。
+/* 合成器底层：按矩形重画"桌面层"(壁纸/终端框/任务栏)。
  * 控制台内容与光标不属于这层，由 ui.c 的 compose_region 编排。 */
 void desktop_repaint_region(int x, int y, int w, int h);
 
@@ -57,8 +59,35 @@ void desktop_repaint_region(int x, int y, int w, int h);
 /* 任务栏宽度与收起时的提示条宽度（desktop.c 定义，命中区共用） */
 #define TASKBAR_W      48
 #define TASKBAR_STRIP  4
-#define TASKBAR_W      48
-#define TASKBAR_STRIP  4
+
+/* ---- 虚拟画布(UI 大更新里程碑) ----
+ * 桌面 = 4x4 = 16 个屏幕组成的有限二维画布,当前视口居其一。
+ * 程序窗口以画布坐标摆放(可跨屏);任务栏/终端窗/雷达图固定于视口。 */
+#define CANVAS_COLS 4
+#define CANVAS_ROWS 4
+
+/* 视口平移(dx,dy 为像素增量,自动钳位到画布范围) */
+void desktop_canvas_pan(int dx, int dy);
+/* 跳到指定屏(col/row 0..3): 视口原点钉在该屏左上角 */
+void desktop_canvas_goto(int col, int row);
+/* 取当前视口原点(画布像素坐标) */
+void desktop_canvas_vp(int *vx, int *vy);
+/* 按屏号增量移动视口(当前屏 + dcol/drow, 钳位到画布) */
+void desktop_canvas_move(int dcol, int drow);
+
+/* 雷达图(右下角,屏宽 1/5 x 屏高 1/8): 点中跳屏,返回 1 = 已消费 */
+int  desktop_minimap_hit(int x, int y);
+
+/* 任务栏顶部用户头像: 点中返回 1(点击打开设置) */
+int  desktop_taskbar_avatar_hit(int x, int y);
+/* 任务栏运行中程序项: 返回项序号(上界由调用方按计数校验),没点中 -1 */
+int  desktop_taskbar_app_hit(int x, int y);
+
+/* 运行中程序列表提供者: idx 从 0 递增,存在返回 1,回传画布坐标矩形与
+ * 标题(任务栏列表与雷达图窗口点共用;ui 侧注册,与时钟提供者同一模式) */
+typedef int (*desktop_running_fn)(int idx, int *x, int *y, int *w, int *h,
+                                  char *title, int cap);
+void desktop_set_running_provider(desktop_running_fn fn);
 
 /* Win 键或点提示条：显示/收起任务栏。切换后调用方负责 ui_refresh()。 */
 void desktop_taskbar_toggle(void);
